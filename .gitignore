@@ -1,0 +1,54 @@
+﻿# ===================================================================
+# AgentFlow Git Ignore Configuration
+# ===================================================================
+
+# Environment files & Secrets
+.env
+.env.local
+.env.*.local
+*.env
+!.env.example
+
+# Maven & Java Build Output
+target/
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+dependency-reduced-pom.xml
+buildNumber.properties
+.mvn/timing.properties
+.mvn/wrapper/maven-wrapper.jar
+
+# Node.js & Frontend Build Output
+node_modules/
+dist/
+dist-ssr/
+*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# IDE & Editor Settings
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+*.code-workspace
+.settings/
+.classpath
+.project
+
+# OS Metadata
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs & Temporary Files
+logs/
+*.log
+*.tmp
+*.bak
