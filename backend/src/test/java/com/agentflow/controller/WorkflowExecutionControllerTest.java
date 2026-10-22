@@ -124,4 +124,29 @@ class WorkflowExecutionControllerTest {
             .andExpect(jsonPath("$.status").value(404))
             .andExpect(jsonPath("$.message").value("Execution not found with id: 99"));
     }
+
+    @Test
+    @DisplayName("POST /api/v1/executions/{id}/retry triggers retry and returns new execution")
+    void shouldRetryFailedExecution() throws Exception {
+        when(executionService.retryExecution(10L)).thenReturn(sampleResponse);
+
+        mockMvc.perform(post("/api/v1/executions/10/retry"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.success").value(true))
+            .andExpect(jsonPath("$.message").value("Workflow execution retried successfully"))
+            .andExpect(jsonPath("$.data.id").value(10))
+            .andExpect(jsonPath("$.data.status").value("COMPLETED"));
+    }
+
+    @Test
+    @DisplayName("POST /api/v1/executions/{id}/retry returns 404 when execution missing")
+    void shouldReturn404WhenRetryingMissingExecution() throws Exception {
+        when(executionService.retryExecution(99L))
+            .thenThrow(new ResourceNotFoundException("Execution not found with id: 99"));
+
+        mockMvc.perform(post("/api/v1/executions/99/retry"))
+            .andExpect(status().isNotFound())
+            .andExpect(jsonPath("$.status").value(404))
+            .andExpect(jsonPath("$.message").value("Execution not found with id: 99"));
+    }
 }

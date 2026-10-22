@@ -96,6 +96,18 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(response);
     }
 
+    @ExceptionHandler(AiServiceUnavailableException.class)
+    public ResponseEntity<ErrorResponse> handleAiServiceUnavailable(AiServiceUnavailableException ex, HttpServletRequest request) {
+        log.warn("AI service unavailable at [{}]: {}", request.getRequestURI(), ex.getMessage());
+        ErrorResponse response = ErrorResponse.of(
+            HttpStatus.SERVICE_UNAVAILABLE.value(),
+            HttpStatus.SERVICE_UNAVAILABLE.getReasonPhrase(),
+            ex.getMessage(),
+            request.getRequestURI()
+        );
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(response);
+    }
+
     @ExceptionHandler(AgentFlowException.class)
     public ResponseEntity<ErrorResponse> handleAgentFlowException(AgentFlowException ex, HttpServletRequest request) {
         log.warn("AgentFlow business exception: {}", ex.getMessage());

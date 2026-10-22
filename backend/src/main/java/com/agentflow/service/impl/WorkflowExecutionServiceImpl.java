@@ -115,6 +115,31 @@ public class WorkflowExecutionServiceImpl implements WorkflowExecutionService {
             .toList();
     }
 
+    @Override
+    @Transactional
+    public WorkflowExecutionResponse retryExecution(Long executionId) {
+        WorkflowExecution originalExecution = executionRepository.findById(executionId)
+            .orElseThrow(() -> new ResourceNotFoundException("Execution not found with id: " + executionId));
+
+        if (!"FAILED".equalsIgnoreCase(originalExecution.getStatus())) {
+            throw new AgentFlowException("Cannot retry execution #" + executionId + ": Status is " 
+                + originalExecution.getStatus() + " (only FAILED executions can be retried)");
+        }
+
+        Workflow workflow = originalExecution.getWorkflow();
+        if (workflow == null) {
+            throw new AgentFlowException("Cannot retry execution #" + executionId + ": Associated workflow no longer exists");
+        }
+
+        if (!workflow.isActive()) {
+            throw new AgentFlowException("Cannot retry execution #" + executionId + ": Workflow '" 
+                + workflow.getName() + "' is currently inactive. Activate it before retrying.");
+        }
+
+        // Re-execute workflow using original input data, generating a new execution record
+        return executeWorkflow(workflow.getId(), new WorkflowExecutionRequest(originalExecution.getInputData()));
+    }
+
     private List<NodeExecutionLogResponse> loadNodeLogs(Long executionId) {
         List<NodeExecutionLog> logs = nodeLogRepository.findByWorkflowExecutionIdOrderByIdAsc(executionId);
         return logs.stream()

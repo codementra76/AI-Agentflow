@@ -46,4 +46,10 @@ public class WorkflowExecutionController {
         List<WorkflowExecutionResponse> executions = executionService.getExecutionsByWorkflowId(id);
         return ResponseEntity.ok(ApiResponse.success(executions));
     }
+
+    @PostMapping("/executions/{id}/retry")
+    public ResponseEntity<ApiResponse<WorkflowExecutionResponse>> retryExecution(@PathVariable Long id) {
+        WorkflowExecutionResponse response = executionService.retryExecution(id);
+        return ResponseEntity.ok(ApiResponse.success("Workflow execution retried successfully", response));
+    }
 }

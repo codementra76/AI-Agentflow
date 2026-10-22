@@ -18,6 +18,8 @@ import {
   getWorkflowById,
   executeWorkflow,
   getWorkflowExecutions,
+  getAllExecutions,
+  retryExecution,
   setWorkflowActive,
   getErrorMessage,
 } from '../services/api';
@@ -54,7 +56,10 @@ const PALETTE_NODES = [
     icon: 'bi-robot',
     color: '#06b6d4',
     description: 'Autonomous LLM agent prompt step',
-    defaultConfig: { prompt: 'Summarize the input text concisely.' },
+    defaultConfig: {
+      prompt: 'Explain the supplied text in simple terms. Include a short Java example when appropriate.',
+      model: 'qwen2.5:3b',
+    },
   },
   {
     type: 'OUTPUT',
@@ -96,6 +101,8 @@ function WorkflowCanvasInner() {
   const [resultsTab, setResultsTab] = useState('output'); // 'output' | 'trace' | 'history'
   const [executionHistory, setExecutionHistory] = useState([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
+  const [historyFilter, setHistoryFilter] = useState('ALL'); // 'ALL' | 'COMPLETED' | 'FAILED'
+  const [isRetrying, setIsRetrying] = useState(false);
   const [showExecutePrompt, setShowExecutePrompt] = useState(null); // { type: 'unSavedWorkflow' | 'inactive' | 'unsaved', title: '', message: '' }
   const [lastSavedSnapshot, setLastSavedSnapshot] = useState(null);
 
@@ -139,21 +146,95 @@ function WorkflowCanvasInner() {
     return current !== lastSavedSnapshot;
   }, [loadedWorkflowId, lastSavedSnapshot, workflowName, workflowDescription, isActive, nodes, edges, getNodes, getEdges, computeSnapshot]);
 
-  // Load execution history for current workflow from backend (GET /api/v1/workflows/{id}/executions)
-  const loadExecutionHistory = useCallback(async (wfId) => {
+  // Load execution history for current workflow from backend with optional status filter
+  const loadExecutionHistory = useCallback(async (wfId, filter = historyFilter) => {
     if (!wfId) return;
     setLoadingHistory(true);
     try {
-      const res = await getWorkflowExecutions(wfId);
+      const res = await getAllExecutions(wfId, filter !== 'ALL' ? filter : null);
       if (res && res.success && Array.isArray(res.data)) {
         setExecutionHistory(res.data);
       }
     } catch {
-      // Ignore background load failures
+      try {
+        const fallbackRes = await getWorkflowExecutions(wfId);
+        if (fallbackRes && fallbackRes.success && Array.isArray(fallbackRes.data)) {
+          const list = fallbackRes.data;
+          setExecutionHistory(filter !== 'ALL' ? list.filter((e) => e.status === filter) : list);
+        }
+      } catch {
+        // Ignore background load failures
+      }
     } finally {
       setLoadingHistory(false);
     }
+  }, [historyFilter]);
+
+  // Decorate canvas nodes with step execution statuses from any execution run
+  const applyExecutionToCanvas = useCallback((executionData) => {
+    if (!executionData) return;
+    const logsMap = new Map();
+    if (Array.isArray(executionData.nodeLogs)) {
+      for (const log of executionData.nodeLogs) {
+        logsMap.set(log.nodeId, log.status);
+      }
+    }
+
+    setNodes((nds) =>
+      nds.map((node) => {
+        const stepStatus = logsMap.get(node.id);
+        if (stepStatus) {
+          return {
+            ...node,
+            data: {
+              ...node.data,
+              executionStatus: stepStatus,
+            },
+          };
+        }
+        return {
+          ...node,
+          data: {
+            ...node.data,
+            executionStatus: executionData.status === 'COMPLETED' ? 'COMPLETED' : undefined,
+          },
+        };
+      })
+    );
   }, []);
+
+  // Retry a failed execution as a new execution run
+  const handleRetryExecution = async (execId) => {
+    if (!execId) return;
+    setIsRetrying(true);
+    try {
+      const response = await retryExecution(execId);
+      if (response && response.success && response.data) {
+        const newExecution = response.data;
+        setExecutionResult(newExecution);
+        setExecutionError(null);
+        applyExecutionToCanvas(newExecution);
+        setResultsTab('output');
+        await loadExecutionHistory(loadedWorkflowId, historyFilter);
+        setNotification({
+          type: newExecution.status === 'COMPLETED' ? 'success' : 'warning',
+          message: `Execution #${execId} retried as new Run #${newExecution.id} (${newExecution.status}). Original failure record preserved.`,
+        });
+      } else {
+        setNotification({
+          type: 'danger',
+          message: response?.message || `Failed to retry execution #${execId}.`,
+        });
+      }
+    } catch (err) {
+      setNotification({
+        type: 'danger',
+        message: `Retry failed: ${getErrorMessage(err)}`,
+      });
+    } finally {
+      setIsRetrying(false);
+    }
+  };
 
   // Define custom node types
   const nodeTypes = useMemo(() => ({
@@ -211,10 +292,9 @@ function WorkflowCanvasInner() {
     });
   }, []);
 
-  // Load saved workflow if workflowId query param is present
   useEffect(() => {
     if (!workflowIdParam) {
-      setLoadedWorkflowId(null);
+      setLoadedWorkflowId((prev) => (prev !== null ? null : prev));
       return;
     }
 
@@ -314,7 +394,7 @@ function WorkflowCanvasInner() {
     return () => {
       isMounted = false;
     };
-  }, [workflowIdParam, fitView]);
+  }, [workflowIdParam, fitView, computeSnapshot, loadExecutionHistory]);
 
   // Helper to sequentially connect current canvas nodes from left to right
   const autoConnectPipeline = useCallback(() => {
@@ -356,6 +436,119 @@ function WorkflowCanvasInner() {
       message: `Sequentially connected ${newEdges.length} step${newEdges.length === 1 ? '' : 's'}.`,
     });
   }, [nodes, getNodes]);
+
+  // Load pre-configured "Java Concept Explainer" example workflow (Phase 4 template)
+  const loadJavaConceptExplainerTemplate = useCallback(() => {
+    const templateNodes = [
+      {
+        id: 'trigger-1',
+        type: 'workflowNode',
+        position: { x: 60, y: 160 },
+        data: {
+          id: 'trigger-1',
+          type: 'MANUAL_TRIGGER',
+          name: 'Manual Trigger',
+          label: 'Manual Trigger',
+          config: {},
+        },
+      },
+      {
+        id: 'input-1',
+        type: 'workflowNode',
+        position: { x: 300, y: 160 },
+        data: {
+          id: 'input-1',
+          type: 'TEXT_INPUT',
+          name: 'Java Concept Input',
+          label: 'Java Concept Input',
+          config: {
+            text: 'Java polymorphism',
+          },
+        },
+      },
+      {
+        id: 'ai-1',
+        type: 'workflowNode',
+        position: { x: 580, y: 160 },
+        data: {
+          id: 'ai-1',
+          type: 'AI_TEXT_PROCESSOR',
+          name: 'Explain Java Concepts',
+          label: 'Explain Java Concepts',
+          config: {
+            prompt: 'Explain the supplied Java concept in simple terms. Include a short example when appropriate.',
+            model: 'qwen2.5:3b',
+          },
+        },
+      },
+      {
+        id: 'output-1',
+        type: 'workflowNode',
+        position: { x: 880, y: 160 },
+        data: {
+          id: 'output-1',
+          type: 'OUTPUT',
+          name: 'Explanation Output',
+          label: 'Explanation Output',
+          config: {},
+        },
+      },
+    ];
+
+    const templateEdges = [
+      {
+        id: 'e-trigger-1-input-1',
+        source: 'trigger-1',
+        target: 'input-1',
+        animated: true,
+        style: { stroke: '#4f46e5', strokeWidth: 2 },
+      },
+      {
+        id: 'e-input-1-ai-1',
+        source: 'input-1',
+        target: 'ai-1',
+        animated: true,
+        style: { stroke: '#4f46e5', strokeWidth: 2 },
+      },
+      {
+        id: 'e-ai-1-output-1',
+        source: 'ai-1',
+        target: 'output-1',
+        animated: true,
+        style: { stroke: '#4f46e5', strokeWidth: 2 },
+      },
+    ];
+
+    setLoadedWorkflowId(null);
+    setWorkflowName('Java Concept Explainer');
+    setWorkflowDescription('Explain Java concepts in simple terms with examples using local Ollama (qwen2.5:3b).');
+    setIsActive(true);
+    setNodes(templateNodes);
+    setEdges(templateEdges);
+    setSelectedNodeId('ai-1');
+    setExecutionResult(null);
+    setExecutionError(null);
+    setShowResultsPanel(false);
+    idCounterRef.current = 5;
+
+    setNotification({
+      type: 'success',
+      message: 'Loaded "Java Concept Explainer" template! Click "Save Workflow" to save it to MySQL.',
+    });
+
+    setTimeout(() => {
+      if (fitView) fitView({ padding: 0.2 });
+    }, 100);
+  }, [fitView]);
+
+  // Compute incoming upstream nodes for the selected node
+  const selectedNodeIncomingNodes = useMemo(() => {
+    if (!selectedNodeId) return [];
+    const incomingEdgeSources = new Set(
+      edges.filter((e) => e.target === selectedNodeId).map((e) => e.source)
+    );
+    return nodes.filter((n) => incomingEdgeSources.has(n.id));
+  }, [selectedNodeId, edges, nodes]);
 
   // Node selection handler
   const onNodeClick = useCallback((_, node) => {
@@ -651,6 +844,17 @@ function WorkflowCanvasInner() {
     setShowResultsPanel(true);
     setResultsTab('output');
 
+    // Immediately mark canvas nodes as RUNNING for active visual feedback
+    setNodes((nds) =>
+      nds.map((node) => ({
+        ...node,
+        data: {
+          ...node.data,
+          executionStatus: 'RUNNING',
+        },
+      }))
+    );
+
     try {
       const response = await executeWorkflow(workflowIdToExecute);
       if (response && response.success && response.data) {
@@ -658,39 +862,40 @@ function WorkflowCanvasInner() {
         setExecutionResult(executionData);
 
         // Decorate nodes on canvas with step execution status (green/red borders)
-        const logsMap = new Map();
-        if (Array.isArray(executionData.nodeLogs)) {
-          for (const log of executionData.nodeLogs) {
-            logsMap.set(log.nodeId, log.status);
-          }
-        }
-
-        setNodes((nds) =>
-          nds.map((node) => {
-            const stepStatus = logsMap.get(node.id);
-            if (stepStatus) {
-              return {
-                ...node,
-                data: {
-                  ...node.data,
-                  executionStatus: stepStatus,
-                },
-              };
-            }
-            return node;
-          })
-        );
+        applyExecutionToCanvas(executionData);
 
         // Refresh execution history
         loadExecutionHistory(workflowIdToExecute);
       } else {
-        setExecutionError(response?.message || 'Execution completed without result data.');
+        const errMsg = response?.message || 'Execution completed without result data.';
+        setExecutionError(errMsg);
+        setNodes((nds) =>
+          nds.map((node) => ({
+            ...node,
+            data: {
+              ...node.data,
+              executionStatus: undefined,
+            },
+          }))
+        );
       }
     } catch (err) {
       const msg = getErrorMessage(err);
-      setExecutionError(msg);
+      // Clean up technical internal stack traces if any
+      const cleanMsg = typeof msg === 'string' ? msg.split('\n')[0] : 'Execution failed';
+      setExecutionError(cleanMsg);
+      setNodes((nds) =>
+        nds.map((node) => ({
+          ...node,
+          data: {
+            ...node.data,
+            executionStatus: undefined,
+          },
+        }))
+      );
     } finally {
       setIsExecuting(false);
+      loadExecutionHistory(workflowIdToExecute);
     }
   };
 
@@ -747,6 +952,15 @@ function WorkflowCanvasInner() {
             >
               <i className="bi bi-arrow-left"></i>
               <span>Dashboard</span>
+            </Link>
+
+            <Link
+              to="/chat"
+              className="btn btn-outline-info btn-sm d-flex align-items-center gap-2"
+              title="Open local AI Assistant"
+            >
+              <i className="bi bi-robot"></i>
+              <span className="d-none d-sm-inline">AI Assistant</span>
             </Link>
 
             <div className="vr bg-secondary mx-1 d-none d-sm-block"></div>
@@ -1033,6 +1247,33 @@ function WorkflowCanvasInner() {
             ))}
           </div>
 
+          {/* Quick-Start Example Template */}
+          <div className="mt-3 pt-3 border-top">
+            <div className="d-flex align-items-center justify-content-between mb-2">
+              <span className="fw-bold text-dark text-uppercase small" style={{ fontSize: '0.7rem' }}>
+                <i className="bi bi-stars text-warning me-1"></i>
+                Example Template
+              </span>
+            </div>
+            <button
+              id="load-example-template-sidebar-btn"
+              type="button"
+              className="btn btn-outline-info btn-sm w-100 text-start p-2 d-flex align-items-center gap-2 shadow-sm"
+              onClick={loadJavaConceptExplainerTemplate}
+              title="Load 4-node Java Concept Explainer workflow (Manual Trigger -> Text Input -> AI Processor -> Output)"
+            >
+              <i className="bi bi-robot fs-5 text-info"></i>
+              <div className="overflow-hidden">
+                <div className="fw-bold text-dark text-truncate" style={{ fontSize: '0.78rem' }}>
+                  Java Concept Explainer
+                </div>
+                <div className="text-muted text-truncate" style={{ fontSize: '0.68rem' }}>
+                  4-node local Ollama flow
+                </div>
+              </div>
+            </button>
+          </div>
+
           {/* Quick Tips */}
           <div className="mt-auto pt-3 border-top text-muted" style={{ fontSize: '0.7rem' }}>
             <div className="fw-semibold text-dark mb-1">
@@ -1075,6 +1316,17 @@ function WorkflowCanvasInner() {
             >
               <i className="bi bi-link-45deg"></i>
               <span className="d-none d-md-inline">Connect Sequence</span>
+            </button>
+
+            {/* Load Example Workflow Template */}
+            <button
+              id="load-example-toolbar-btn"
+              className="btn btn-outline-info btn-sm d-flex align-items-center gap-1"
+              onClick={loadJavaConceptExplainerTemplate}
+              title="Load Pre-built Example: Java Concept Explainer (MANUAL_TRIGGER -> TEXT_INPUT -> AI_TEXT_PROCESSOR -> OUTPUT)"
+            >
+              <i className="bi bi-stars text-info"></i>
+              <span className="d-none d-lg-inline">Example: Java Explainer</span>
             </button>
 
             {/* Results & History Panel Button */}
@@ -1286,7 +1538,7 @@ function WorkflowCanvasInner() {
                       className={`btn btn-sm ${resultsTab === 'history' ? 'btn-primary' : 'btn-outline-light'}`}
                       onClick={() => {
                         setResultsTab('history');
-                        loadExecutionHistory(loadedWorkflowId);
+                        loadExecutionHistory(loadedWorkflowId, historyFilter);
                       }}
                     >
                       <i className="bi bi-clock-history me-1"></i>
@@ -1321,33 +1573,69 @@ function WorkflowCanvasInner() {
                 {/* Tab 1: Output & Overview */}
                 {resultsTab === 'output' && (
                   <div>
-                    {executionError ? (
+                    {isExecuting ? (
+                      <div className="card shadow-sm border-0 rounded-3 bg-white p-4 text-center my-3">
+                        <div className="spinner-border text-info mx-auto mb-3" role="status" style={{ width: '2.5rem', height: '2.5rem' }}>
+                          <span className="visually-hidden">Executing...</span>
+                        </div>
+                        <h6 className="fw-bold mb-1 text-dark">Workflow Execution in Progress</h6>
+                        <p className="text-muted small mb-2">
+                          Executing workflow steps in topological order on the backend engine.
+                        </p>
+                        <div className="d-inline-flex align-items-center gap-2 px-3 py-1 bg-info-subtle text-info-emphasis rounded-pill border border-info-subtle mx-auto small">
+                          <i className="bi bi-robot text-info"></i>
+                          <span>Local AI inference running on Ollama (<code>qwen2.5:3b</code>)...</span>
+                        </div>
+                      </div>
+                    ) : executionError ? (
                       <div className="alert alert-danger shadow-sm mb-0">
                         <div className="d-flex align-items-center gap-2 mb-1">
                           <i className="bi bi-exclamation-triangle-fill fs-5"></i>
                           <h6 className="fw-bold mb-0">Execution Failed</h6>
                         </div>
-                        <p className="mb-0 font-monospace small">{executionError}</p>
+                        <p className="mb-1 font-monospace small">{executionError}</p>
+                        {executionError?.toLowerCase().includes('ollama') && (
+                          <div className="alert alert-warning py-2 px-3 mt-2 mb-0 small border-warning-subtle text-dark">
+                            <i className="bi bi-info-circle-fill me-1 text-warning"></i>
+                            <strong>Local AI Provider:</strong> The <code>AI_TEXT_PROCESSOR</code> node runs locally on Ollama (<code>qwen2.5:3b</code>). Please verify Ollama is running on <code>http://localhost:11434</code>.
+                          </div>
+                        )}
                       </div>
                     ) : executionResult ? (
                       <div className="d-flex flex-column gap-3">
                         {/* Status Alert for Failed Executions */}
                         {executionResult.status === 'FAILED' && (
                           <div className="alert alert-danger shadow-sm mb-0 py-2 px-3">
-                            <div className="d-flex align-items-start gap-2">
-                              <i className="bi bi-x-circle-fill fs-5 mt-1 text-danger"></i>
-                              <div>
-                                <h6 className="fw-bold text-danger mb-1">Pipeline Execution Failed</h6>
-                                <p className="mb-1 font-monospace small">
-                                  {executionResult.errorMessage || 'One or more steps failed during topological execution.'}
-                                </p>
-                                {executionResult.errorMessage?.includes('AI_API_KEY') && (
-                                  <div className="alert alert-warning py-2 px-3 mt-2 mb-0 small border-warning-subtle text-dark">
-                                    <i className="bi bi-info-circle-fill me-1 text-warning"></i>
-                                    <strong>AI Provider Setup:</strong> The <code>AI_TEXT_PROCESSOR</code> node requires an <code>AI_API_KEY</code> environment variable configured in Spring Boot (e.g. OpenAI key). Standard nodes (Manual Trigger, Text Input, Text Transform, Output) run autonomously without external keys.
-                                  </div>
-                                )}
+                            <div className="d-flex align-items-start justify-content-between gap-2">
+                              <div className="d-flex align-items-start gap-2">
+                                <i className="bi bi-x-circle-fill fs-5 mt-1 text-danger"></i>
+                                <div>
+                                  <h6 className="fw-bold text-danger mb-1">Pipeline Execution Failed</h6>
+                                  <p className="mb-1 font-monospace small">
+                                    {executionResult.errorMessage || 'One or more steps failed during topological execution.'}
+                                  </p>
+                                  {executionResult.errorMessage?.toLowerCase().includes('ollama') && (
+                                    <div className="alert alert-warning py-2 px-3 mt-2 mb-0 small border-warning-subtle text-dark">
+                                      <i className="bi bi-info-circle-fill me-1 text-warning"></i>
+                                      <strong>Local AI Provider:</strong> The <code>AI_TEXT_PROCESSOR</code> node runs locally on Ollama (<code>qwen2.5:3b</code>). Please verify Ollama is running on <code>http://localhost:11434</code>.
+                                    </div>
+                                  )}
+                                </div>
                               </div>
+                              <button
+                                type="button"
+                                className="btn btn-warning btn-sm d-flex align-items-center gap-1 flex-shrink-0 shadow-sm"
+                                onClick={() => handleRetryExecution(executionResult.id)}
+                                disabled={isRetrying}
+                                title="Retry this failed execution with original input data"
+                              >
+                                {isRetrying ? (
+                                  <span className="spinner-border spinner-border-sm" role="status"></span>
+                                ) : (
+                                  <i className="bi bi-arrow-clockwise"></i>
+                                )}
+                                <span>Retry Execution</span>
+                              </button>
                             </div>
                           </div>
                         )}
@@ -1377,13 +1665,57 @@ function WorkflowCanvasInner() {
                                 </button>
                               )}
                             </div>
-                            <div className="p-3 bg-light rounded-3 border text-dark font-monospace fs-5 fw-bold text-break">
+                            <div className="p-3 bg-light rounded-3 border text-dark font-monospace fs-6 fw-normal text-break" style={{ whiteSpace: 'pre-wrap', maxHeight: '180px', overflowY: 'auto' }}>
                               {typeof executionResult.outputData?.result === 'string'
                                 ? executionResult.outputData.result
                                 : JSON.stringify(executionResult.outputData?.result || executionResult.outputData, null, 2)}
                             </div>
                           </div>
                         )}
+
+                        {/* Dedicated AI Node Output Card (if pipeline includes AI_TEXT_PROCESSOR) */}
+                        {(() => {
+                          const aiLog = Array.isArray(executionResult.nodeLogs)
+                            ? executionResult.nodeLogs.find((l) => l.nodeType === 'AI_TEXT_PROCESSOR')
+                            : null;
+                          if (!aiLog || !aiLog.outputData) return null;
+                          return (
+                            <div className="card shadow-sm border-0 rounded-3 bg-white p-3 border-start border-4 border-info">
+                              <div className="d-flex align-items-center justify-content-between mb-2">
+                                <div className="d-flex align-items-center gap-2">
+                                  <i className="bi bi-robot text-info fs-5"></i>
+                                  <span className="text-dark small fw-bold text-uppercase">
+                                    AI Generated Output ({aiLog.nodeId})
+                                  </span>
+                                  <span className="badge bg-info-subtle text-info-emphasis border border-info-subtle font-monospace" style={{ fontSize: '0.65rem' }}>
+                                    Ollama: {aiLog.outputData?.model || 'qwen2.5:3b'}
+                                  </span>
+                                </div>
+                                {aiLog.outputData?.result && (
+                                  <button
+                                    className="btn btn-outline-secondary btn-sm py-0 px-2 small"
+                                    onClick={() => {
+                                      const val = typeof aiLog.outputData.result === 'string'
+                                        ? aiLog.outputData.result
+                                        : JSON.stringify(aiLog.outputData.result);
+                                      navigator.clipboard.writeText(val);
+                                      setNotification({ type: 'success', message: 'AI output copied to clipboard!' });
+                                    }}
+                                    title="Copy AI Output"
+                                  >
+                                    <i className="bi bi-clipboard me-1"></i>
+                                    Copy AI Output
+                                  </button>
+                                )}
+                              </div>
+                              <div className="p-3 bg-light rounded-3 border text-dark font-monospace fs-6 fw-normal text-break" style={{ whiteSpace: 'pre-wrap', maxHeight: '180px', overflowY: 'auto' }}>
+                                {typeof aiLog.outputData?.result === 'string'
+                                  ? aiLog.outputData.result
+                                  : JSON.stringify(aiLog.outputData?.result || aiLog.outputData, null, 2)}
+                              </div>
+                            </div>
+                          );
+                        })()}
 
                         {/* Raw JSON Data Accordion */}
                         <details className="card shadow-sm border-0 rounded-3 bg-white p-2">
@@ -1481,13 +1813,30 @@ function WorkflowCanvasInner() {
                 {/* Tab 3: Execution History */}
                 {resultsTab === 'history' && (
                   <div>
-                    <div className="d-flex align-items-center justify-content-between mb-2">
-                      <span className="text-muted small fw-semibold">
-                        Past Executions for Workflow #{loadedWorkflowId} ({executionHistory.length})
-                      </span>
+                    <div className="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-3">
+                      <div className="d-flex align-items-center gap-2">
+                        <span className="text-muted small fw-semibold">
+                          Past Runs for Workflow #{loadedWorkflowId} ({executionHistory.length})
+                        </span>
+                        <div className="btn-group btn-group-sm" role="group">
+                          {['ALL', 'COMPLETED', 'FAILED'].map((st) => (
+                            <button
+                              key={st}
+                              type="button"
+                              className={`btn btn-sm ${historyFilter === st ? 'btn-primary' : 'btn-outline-secondary'}`}
+                              onClick={() => {
+                                setHistoryFilter(st);
+                                loadExecutionHistory(loadedWorkflowId, st);
+                              }}
+                            >
+                              {st === 'ALL' ? 'All' : st}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
                       <button
                         className="btn btn-outline-secondary btn-sm py-0 px-2 small"
-                        onClick={() => loadExecutionHistory(loadedWorkflowId)}
+                        onClick={() => loadExecutionHistory(loadedWorkflowId, historyFilter)}
                         disabled={loadingHistory}
                         title="Reload history"
                       >
@@ -1502,11 +1851,11 @@ function WorkflowCanvasInner() {
                           <thead className="table-light small text-uppercase">
                             <tr>
                               <th style={{ width: '70px' }}>Run #</th>
-                              <th>Status</th>
+                              <th style={{ width: '120px' }}>Status</th>
                               <th>Started At</th>
                               <th>Duration</th>
-                              <th>Final Output</th>
-                              <th style={{ width: '100px' }} className="text-end">Action</th>
+                              <th>Final Output / Error</th>
+                              <th style={{ width: '150px' }} className="text-end">Actions</th>
                             </tr>
                           </thead>
                           <tbody className="small">
@@ -1534,22 +1883,49 @@ function WorkflowCanvasInner() {
                                   </td>
                                   <td className="font-monospace text-muted">{duration}</td>
                                   <td className="font-monospace text-truncate text-break" style={{ maxWidth: '280px' }}>
-                                    {hist.outputData?.result
-                                      ? String(hist.outputData.result)
-                                      : hist.errorMessage
-                                      ? hist.errorMessage
-                                      : '-'}
+                                    {hist.errorMessage ? (
+                                      <span className="text-danger">{hist.errorMessage}</span>
+                                    ) : hist.outputData?.result ? (
+                                      String(hist.outputData.result)
+                                    ) : hist.outputData ? (
+                                      JSON.stringify(hist.outputData)
+                                    ) : (
+                                      '-'
+                                    )}
                                   </td>
                                   <td className="text-end">
-                                    <button
-                                      className={`btn btn-sm ${isCurrent ? 'btn-primary' : 'btn-outline-primary'} py-0 px-2 small`}
-                                      onClick={() => {
-                                        setExecutionResult(hist);
-                                        setResultsTab('output');
-                                      }}
-                                    >
-                                      {isCurrent ? 'Viewing' : 'Inspect'}
-                                    </button>
+                                    <div className="d-inline-flex align-items-center gap-1">
+                                      {hist.status === 'FAILED' && (
+                                        <button
+                                          className="btn btn-sm btn-outline-warning py-0 px-2 small d-inline-flex align-items-center gap-1"
+                                          onClick={() => handleRetryExecution(hist.id)}
+                                          disabled={isRetrying}
+                                          title="Retry this failed execution as a new run"
+                                        >
+                                          {isRetrying ? (
+                                            <span className="spinner-border spinner-border-sm" role="status"></span>
+                                          ) : (
+                                            <i className="bi bi-arrow-clockwise"></i>
+                                          )}
+                                          <span>Retry</span>
+                                        </button>
+                                      )}
+                                      <button
+                                        className={`btn btn-sm ${isCurrent ? 'btn-primary' : 'btn-outline-primary'} py-0 px-2 small`}
+                                        onClick={() => {
+                                          setExecutionResult(hist);
+                                          setExecutionError(null);
+                                          applyExecutionToCanvas(hist);
+                                          setResultsTab('output');
+                                          setNotification({
+                                            type: 'info',
+                                            message: `Inspecting past execution Run #${hist.id} (${hist.status})`,
+                                          });
+                                        }}
+                                      >
+                                        {isCurrent ? 'Viewing' : 'Inspect'}
+                                      </button>
+                                    </div>
                                   </td>
                                 </tr>
                               );
@@ -1709,25 +2085,144 @@ function WorkflowCanvasInner() {
               )}
 
               {selectedNode.data.type === 'AI_TEXT_PROCESSOR' && (
-                <div>
-                  <label htmlFor="ai-prompt-field" className="form-label small fw-bold text-secondary mb-1">
-                    AI Prompt / Instructions
-                  </label>
-                  <textarea
-                    id="ai-prompt-field"
-                    className="form-control form-control-sm font-monospace"
-                    rows={4}
-                    value={selectedNode.data.config?.prompt || ''}
-                    onChange={(e) =>
-                      updateSelectedNodeData({
-                        config: { prompt: e.target.value },
-                      })
-                    }
-                    placeholder="e.g. Extract the main action items from the text..."
-                  ></textarea>
-                  <small className="text-muted" style={{ fontSize: '0.7rem' }}>
-                    Note: Executing AI nodes requires an AI API Key configured on the backend.
-                  </small>
+                <div className="d-flex flex-column gap-3">
+                  {/* 1. AI Instruction / Prompt */}
+                  <div>
+                    <div className="d-flex align-items-center justify-content-between mb-1">
+                      <label htmlFor="ai-prompt-field" className="form-label small fw-bold text-secondary mb-0">
+                        AI Instruction / Prompt
+                      </label>
+                      <span className="badge bg-info-subtle text-info-emphasis border border-info-subtle" style={{ fontSize: '0.65rem' }}>
+                        Required if no upstream text
+                      </span>
+                    </div>
+                    <textarea
+                      id="ai-prompt-field"
+                      className="form-control form-control-sm font-monospace"
+                      rows={4}
+                      value={selectedNode.data.config?.prompt || ''}
+                      onChange={(e) =>
+                        updateSelectedNodeData({
+                          config: { prompt: e.target.value },
+                        })
+                      }
+                      placeholder="e.g. Explain the supplied Java concept in simple terms. Include a short example when appropriate."
+                    ></textarea>
+                    <small className="text-muted d-block mt-1" style={{ fontSize: '0.7rem' }}>
+                      Instructions for the AI agent. Combines automatically with connected upstream inputs.
+                    </small>
+                  </div>
+
+                  {/* 2. Upstream Input Description */}
+                  <div>
+                    <label className="form-label small fw-bold text-secondary mb-1 d-flex align-items-center gap-1">
+                      <i className="bi bi-box-arrow-in-right text-primary"></i>
+                      <span>Upstream Input</span>
+                    </label>
+                    {selectedNodeIncomingNodes.length > 0 ? (
+                      <div className="bg-light p-2 rounded-2 border">
+                        <div className="d-flex align-items-center justify-content-between mb-1">
+                          <span className="small text-muted" style={{ fontSize: '0.72rem' }}>
+                            Connected upstream node{selectedNodeIncomingNodes.length > 1 ? 's' : ''}:
+                          </span>
+                          <span className="badge bg-primary-subtle text-primary border" style={{ fontSize: '0.65rem' }}>
+                            {selectedNodeIncomingNodes.length} source{selectedNodeIncomingNodes.length > 1 ? 's' : ''}
+                          </span>
+                        </div>
+                        <div className="d-flex flex-column gap-1">
+                          {selectedNodeIncomingNodes.map((srcNode) => (
+                            <div key={srcNode.id} className="d-flex align-items-center justify-content-between bg-white px-2 py-1 rounded border small">
+                              <span className="fw-semibold text-dark text-truncate" style={{ maxWidth: '140px' }}>
+                                {srcNode.data?.name || srcNode.id}
+                              </span>
+                              <span className="badge bg-secondary-subtle text-secondary font-monospace" style={{ fontSize: '0.65rem' }}>
+                                {srcNode.data?.type}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                        <small className="text-muted d-block mt-2" style={{ fontSize: '0.7rem' }}>
+                          <i className="bi bi-info-circle me-1 text-primary"></i>
+                          The output text from {selectedNodeIncomingNodes.map((n) => `"${n.data?.name || n.id}"`).join(', ')} will be forwarded to this AI node.
+                        </small>
+                      </div>
+                    ) : (
+                      <div className="alert alert-light border small text-muted py-2 px-3 mb-0">
+                        <div className="d-flex align-items-center gap-1 text-secondary fw-semibold mb-1">
+                          <i className="bi bi-info-circle text-info"></i>
+                          <span>Prompt-Only Mode:</span>
+                        </div>
+                        <p className="mb-0" style={{ fontSize: '0.72rem' }}>
+                          No upstream node is connected. This node will run using only the configured instruction above.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* 3. Optional Model Override */}
+                  <div>
+                    <label htmlFor="ai-model-field" className="form-label small fw-bold text-secondary mb-1 d-flex align-items-center justify-content-between">
+                      <span>Ollama Model (Optional)</span>
+                      <span className="badge bg-light text-muted border" style={{ fontSize: '0.65rem' }}>
+                        Default: qwen2.5:3b
+                      </span>
+                    </label>
+                    <div className="input-group input-group-sm">
+                      <span className="input-group-text bg-white text-muted">
+                        <i className="bi bi-cpu"></i>
+                      </span>
+                      <input
+                        id="ai-model-field"
+                        type="text"
+                        className="form-control form-control-sm font-monospace"
+                        value={selectedNode.data.config?.model || ''}
+                        onChange={(e) =>
+                          updateSelectedNodeData({
+                            config: { model: e.target.value },
+                          })
+                        }
+                        placeholder="qwen2.5:3b"
+                      />
+                    </div>
+                    <small className="text-muted d-block mt-1" style={{ fontSize: '0.7rem' }}>
+                      Leave blank to use the configured local model (<code>qwen2.5:3b</code>).
+                    </small>
+                  </div>
+
+                  {/* 4. Prompt & Input Combination Explanation */}
+                  <div className="card bg-info-subtle border-info-subtle p-2 rounded-2">
+                    <div className="d-flex align-items-center gap-1 text-info-emphasis small fw-bold mb-1">
+                      <i className="bi bi-diagram-3-fill"></i>
+                      <span>How Ollama Processes This Step:</span>
+                    </div>
+                    <p className="small mb-1 text-dark" style={{ fontSize: '0.72rem' }}>
+                      {selectedNodeIncomingNodes.length > 0
+                        ? 'Instruction and upstream output are combined in this predictable structure:'
+                        : 'In prompt-only mode, your instruction is sent directly to Ollama:'}
+                    </p>
+                    <div className="p-2 bg-white rounded border font-monospace text-secondary" style={{ fontSize: '0.68rem', lineHeight: '1.3' }}>
+                      {selectedNodeIncomingNodes.length > 0 ? (
+                        <>
+                          <div className="text-primary fw-bold">
+                            {selectedNode.data.config?.prompt
+                              ? `"${selectedNode.data.config.prompt.slice(0, 36)}${selectedNode.data.config.prompt.length > 36 ? '...' : ''}"`
+                              : '<Configured Instruction>'}
+                          </div>
+                          <div className="text-muted my-1 fw-bold">Input:</div>
+                          <div className="text-success">&lt;Output text from upstream node&gt;</div>
+                        </>
+                      ) : (
+                        <div className="text-primary fw-bold">
+                          {selectedNode.data.config?.prompt
+                            ? `"${selectedNode.data.config.prompt.slice(0, 48)}${selectedNode.data.config.prompt.length > 48 ? '...' : ''}"`
+                            : '<Configured Instruction>'}
+                        </div>
+                      )}
+                    </div>
+                    <small className="text-muted d-block mt-1" style={{ fontSize: '0.68rem' }}>
+                      Generated response is passed downstream in both <code>text</code> and <code>result</code> fields.
+                    </small>
+                  </div>
                 </div>
               )}
 

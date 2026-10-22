@@ -60,13 +60,23 @@ export const createWorkflow = async (data) => {
 };
 
 /**
+ * Timeout in milliseconds for workflow execution and retry endpoints.
+ * Local LLM inference (e.g. Ollama with qwen2.5:3b) typically takes 10-30 seconds.
+ * 90 seconds gives the backend enough time to complete processing or return its own
+ * 60-second Ollama timeout error before the client aborts.
+ */
+export const WORKFLOW_EXECUTION_TIMEOUT_MS = 90000;
+
+/**
  * Execute a workflow by its ID
  * Payload: optional { inputData }
  * Backend returns: { success: true, message: "...", data: WorkflowExecutionResponse }
  */
 export const executeWorkflow = async (id, inputData = null) => {
   const payload = inputData ? { inputData } : {};
-  const response = await api.post(`/workflows/${id}/execute`, payload);
+  const response = await api.post(`/workflows/${id}/execute`, payload, {
+    timeout: WORKFLOW_EXECUTION_TIMEOUT_MS,
+  });
   return response.data;
 };
 
@@ -85,6 +95,34 @@ export const getWorkflowExecutions = async (id) => {
  */
 export const getExecutionById = async (id) => {
   const response = await api.get(`/executions/${id}`);
+  return response.data;
+};
+
+/**
+ * Get all executions across workflows with optional filtering by workflowId and status
+ * Backend returns: { success: true, message: "...", data: [WorkflowExecutionResponse, ...] }
+ */
+export const getAllExecutions = async (workflowId = null, status = null) => {
+  const params = {};
+  if (workflowId !== undefined && workflowId !== null && workflowId !== '') {
+    params.workflowId = workflowId;
+  }
+  if (status !== undefined && status !== null && status !== '' && status !== 'ALL') {
+    params.status = status;
+  }
+  const response = await api.get('/executions', { params });
+  return response.data;
+};
+
+/**
+ * Retry a failed execution by its ID
+ * Backend creates a new execution row and preserves the original failure
+ * Backend returns: { success: true, message: "...", data: WorkflowExecutionResponse }
+ */
+export const retryExecution = async (id) => {
+  const response = await api.post(`/executions/${id}/retry`, {}, {
+    timeout: WORKFLOW_EXECUTION_TIMEOUT_MS,
+  });
   return response.data;
 };
 
@@ -121,6 +159,23 @@ export const deleteWorkflow = async (id) => {
  */
 export const getHealth = async () => {
   const response = await api.get('/health');
+  return response.data;
+};
+
+/**
+ * Send a chat prompt to the local AI provider (Ollama)
+ * Payload: { prompt, model? }
+ * Configured with an extended 60-second timeout for local LLM inference
+ * Backend returns: { success: true, message: "...", data: { response: "...", model: "..." } }
+ */
+export const chatWithAi = async (prompt, model = null) => {
+  const payload = { prompt };
+  if (model) {
+    payload.model = model;
+  }
+  const response = await api.post('/ai/chat', payload, {
+    timeout: 60000,
+  });
   return response.data;
 };
 

@@ -5,6 +5,9 @@ import com.agentflow.entity.WorkflowExecution;
 import com.agentflow.exception.WorkflowValidationException;
 import com.agentflow.repository.NodeExecutionLogRepository;
 import com.agentflow.repository.WorkflowExecutionRepository;
+import com.agentflow.dto.ai.AiChatResponse;
+import com.agentflow.exception.AiServiceUnavailableException;
+import com.agentflow.service.OllamaService;
 import com.agentflow.workflow.engine.executor.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -23,7 +26,11 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -39,6 +46,9 @@ class WorkflowExecutionEngineTest {
     @Mock
     private WorkflowExecutionRepository executionRepository;
 
+    @Mock
+    private OllamaService ollamaService;
+
     private Workflow sampleWorkflow;
 
     @BeforeEach
@@ -48,7 +58,7 @@ class WorkflowExecutionEngineTest {
         ManualTriggerExecutor manualTriggerExecutor = new ManualTriggerExecutor();
         TextInputExecutor textInputExecutor = new TextInputExecutor();
         TextTransformExecutor textTransformExecutor = new TextTransformExecutor();
-        AiTextProcessorExecutor aiTextProcessorExecutor = new AiTextProcessorExecutor();
+        AiTextProcessorExecutor aiTextProcessorExecutor = new AiTextProcessorExecutor(ollamaService);
         OutputExecutor outputExecutor = new OutputExecutor();
 
         engine = new WorkflowExecutionEngine(
@@ -221,12 +231,62 @@ class WorkflowExecutionEngineTest {
     }
 
     @Test
-    @DisplayName("Fail when AI_TEXT_PROCESSOR runs without configured API key")
-    void shouldFailWhenAiNodeExecutedWithoutApiKey() {
+    @DisplayName("Successfully execute AI_TEXT_PROCESSOR combining prompt and upstream input text")
+    void shouldSuccessfullyExecuteAiNodeWithUpstreamText() {
+        when(ollamaService.generateChat(any(), any()))
+            .thenReturn(new AiChatResponse("Polymorphism allows objects to take multiple forms.", "qwen2.5:3b"));
+
         ObjectNode graph = objectMapper.createObjectNode();
         ArrayNode nodes = graph.putArray("nodes");
         nodes.addObject().put("id", "trig-1").put("type", "MANUAL_TRIGGER");
-        nodes.addObject().put("id", "ai-1").put("type", "AI_TEXT_PROCESSOR");
+
+        ObjectNode textNode = nodes.addObject();
+        textNode.put("id", "text-1").put("type", "TEXT_INPUT");
+        textNode.putObject("config").put("text", "Java polymorphism");
+
+        ObjectNode aiNode = nodes.addObject();
+        aiNode.put("id", "ai-1").put("type", "AI_TEXT_PROCESSOR");
+        aiNode.putObject("config").put("prompt", "Explain the following text in simple terms.");
+
+        nodes.addObject().put("id", "out-1").put("type", "OUTPUT");
+
+        ArrayNode edges = graph.putArray("edges");
+        edges.addObject().put("source", "trig-1").put("target", "text-1");
+        edges.addObject().put("source", "text-1").put("target", "ai-1");
+        edges.addObject().put("source", "ai-1").put("target", "out-1");
+
+        WorkflowGraph validatedGraph = validator.validateAndBuild(graph);
+
+        WorkflowExecution execution = new WorkflowExecution();
+        execution.setId(10L);
+        execution.setWorkflow(sampleWorkflow);
+
+        WorkflowExecution result = engine.run(validatedGraph, execution);
+
+        assertThat(result.getStatus()).isEqualTo("COMPLETED");
+        assertThat(result.getOutputData().get("result").asText())
+            .isEqualTo("Polymorphism allows objects to take multiple forms.");
+
+        verify(ollamaService).generateChat(
+            argThat(p -> p.contains("Explain the following text in simple terms.") && p.contains("Java polymorphism")),
+            eq(null)
+        );
+    }
+
+    @Test
+    @DisplayName("Successfully execute AI_TEXT_PROCESSOR with prompt only when no upstream text exists")
+    void shouldExecuteAiNodeWithPromptOnlyWhenNoUpstreamText() {
+        when(ollamaService.generateChat(any(), any()))
+            .thenReturn(new AiChatResponse("Spring Boot accelerates microservices development.", "qwen2.5:3b"));
+
+        ObjectNode graph = objectMapper.createObjectNode();
+        ArrayNode nodes = graph.putArray("nodes");
+        nodes.addObject().put("id", "trig-1").put("type", "MANUAL_TRIGGER");
+
+        ObjectNode aiNode = nodes.addObject();
+        aiNode.put("id", "ai-1").put("type", "AI_TEXT_PROCESSOR");
+        aiNode.putObject("config").put("prompt", "Explain Spring Boot concisely.");
+
         nodes.addObject().put("id", "out-1").put("type", "OUTPUT");
 
         ArrayNode edges = graph.putArray("edges");
@@ -236,12 +296,73 @@ class WorkflowExecutionEngineTest {
         WorkflowGraph validatedGraph = validator.validateAndBuild(graph);
 
         WorkflowExecution execution = new WorkflowExecution();
-        execution.setId(2L);
+        execution.setId(11L);
+        execution.setWorkflow(sampleWorkflow);
+
+        WorkflowExecution result = engine.run(validatedGraph, execution);
+
+        assertThat(result.getStatus()).isEqualTo("COMPLETED");
+        assertThat(result.getOutputData().get("result").asText())
+            .isEqualTo("Spring Boot accelerates microservices development.");
+
+        verify(ollamaService).generateChat(eq("Explain Spring Boot concisely."), eq(null));
+    }
+
+    @Test
+    @DisplayName("Fail when AI_TEXT_PROCESSOR has neither configured prompt nor upstream text")
+    void shouldFailWhenBothPromptAndUpstreamTextAreMissing() {
+        ObjectNode graph = objectMapper.createObjectNode();
+        ArrayNode nodes = graph.putArray("nodes");
+        nodes.addObject().put("id", "trig-1").put("type", "MANUAL_TRIGGER");
+        nodes.addObject().put("id", "ai-1").put("type", "AI_TEXT_PROCESSOR"); // no prompt in config
+        nodes.addObject().put("id", "out-1").put("type", "OUTPUT");
+
+        ArrayNode edges = graph.putArray("edges");
+        edges.addObject().put("source", "trig-1").put("target", "ai-1");
+        edges.addObject().put("source", "ai-1").put("target", "out-1");
+
+        WorkflowGraph validatedGraph = validator.validateAndBuild(graph);
+
+        WorkflowExecution execution = new WorkflowExecution();
+        execution.setId(12L);
         execution.setWorkflow(sampleWorkflow);
 
         WorkflowExecution result = engine.run(validatedGraph, execution);
 
         assertThat(result.getStatus()).isEqualTo("FAILED");
-        assertThat(result.getErrorMessage()).contains("AI functionality is unavailable");
+        assertThat(result.getErrorMessage()).contains("requires a prompt in config or input text from an upstream node");
     }
+
+    @Test
+    @DisplayName("Fail workflow execution when OllamaService throws an exception")
+    void shouldFailWorkflowExecutionWhenOllamaThrowsException() {
+        when(ollamaService.generateChat(any(), any()))
+            .thenThrow(new AiServiceUnavailableException("Cannot connect to local Ollama service at http://localhost:11434"));
+
+        ObjectNode graph = objectMapper.createObjectNode();
+        ArrayNode nodes = graph.putArray("nodes");
+        nodes.addObject().put("id", "trig-1").put("type", "MANUAL_TRIGGER");
+
+        ObjectNode aiNode = nodes.addObject();
+        aiNode.put("id", "ai-1").put("type", "AI_TEXT_PROCESSOR");
+        aiNode.putObject("config").put("prompt", "Explain AI");
+
+        nodes.addObject().put("id", "out-1").put("type", "OUTPUT");
+
+        ArrayNode edges = graph.putArray("edges");
+        edges.addObject().put("source", "trig-1").put("target", "ai-1");
+        edges.addObject().put("source", "ai-1").put("target", "out-1");
+
+        WorkflowGraph validatedGraph = validator.validateAndBuild(graph);
+
+        WorkflowExecution execution = new WorkflowExecution();
+        execution.setId(13L);
+        execution.setWorkflow(sampleWorkflow);
+
+        WorkflowExecution result = engine.run(validatedGraph, execution);
+
+        assertThat(result.getStatus()).isEqualTo("FAILED");
+        assertThat(result.getErrorMessage()).contains("Cannot connect to local Ollama service at http://localhost:11434");
+    }
+
 }

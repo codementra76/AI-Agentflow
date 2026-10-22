@@ -10,4 +10,5 @@ public interface WorkflowExecutionService {
     List<WorkflowExecutionResponse> getAllExecutions(Long workflowId, String status);
     WorkflowExecutionResponse getExecutionById(Long executionId);
     List<WorkflowExecutionResponse> getExecutionsByWorkflowId(Long workflowId);
+    WorkflowExecutionResponse retryExecution(Long executionId);
 }

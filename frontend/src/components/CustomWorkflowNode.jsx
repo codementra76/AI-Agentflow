@@ -57,8 +57,14 @@ const CustomWorkflowNode = memo(({ data, selected }) => {
         return config.text ? `"${config.text.slice(0, 24)}${config.text.length > 24 ? '...' : ''}"` : 'No text entered';
       case 'TEXT_TRANSFORM':
         return config.operation ? `Op: ${config.operation}` : 'Op: UPPERCASE';
-      case 'AI_TEXT_PROCESSOR':
-        return config.prompt ? `Prompt: ${config.prompt.slice(0, 20)}...` : 'LLM Instruction';
+      case 'AI_TEXT_PROCESSOR': {
+        const modelSuffix = config.model && config.model !== 'qwen2.5:3b' ? ` [${config.model}]` : '';
+        if (config.prompt) {
+          const truncated = config.prompt.length > 20 ? `${config.prompt.slice(0, 20)}...` : config.prompt;
+          return `Prompt: "${truncated}"${modelSuffix}`;
+        }
+        return `Ollama (qwen2.5:3b)${modelSuffix}`;
+      }
       case 'MANUAL_TRIGGER':
         return 'Pipeline Entry';
       case 'OUTPUT':
@@ -68,6 +74,8 @@ const CustomWorkflowNode = memo(({ data, selected }) => {
     }
   };
 
+  const isRunning = data.executionStatus === 'RUNNING';
+
   return (
     <div
       className={`card shadow-sm rounded-3 border ${
@@ -75,6 +83,8 @@ const CustomWorkflowNode = memo(({ data, selected }) => {
           ? 'border-danger'
           : data.executionStatus === 'COMPLETED'
           ? 'border-success'
+          : isRunning
+          ? 'border-info'
           : selected
           ? 'border-primary ring-selected'
           : 'border-secondary-subtle'
@@ -88,6 +98,8 @@ const CustomWorkflowNode = memo(({ data, selected }) => {
           ? '0 0 0 3px rgba(239, 68, 68, 0.25)'
           : data.executionStatus === 'COMPLETED'
           ? '0 0 0 3px rgba(16, 185, 129, 0.25)'
+          : isRunning
+          ? '0 0 0 3px rgba(6, 182, 212, 0.4)'
           : selected
           ? '0 0 0 3px rgba(59, 130, 246, 0.25)'
           : undefined,
@@ -131,17 +143,26 @@ const CustomWorkflowNode = memo(({ data, selected }) => {
           </span>
           {data.executionStatus && (
             <span
-              className={`badge rounded-pill px-2 py-0 small ${
+              className={`badge rounded-pill px-2 py-0 small d-inline-flex align-items-center gap-1 ${
                 data.executionStatus === 'COMPLETED'
                   ? 'bg-success text-white'
                   : data.executionStatus === 'FAILED'
                   ? 'bg-danger text-white'
-                  : 'bg-primary text-white'
+                  : 'bg-info text-dark fw-semibold'
               }`}
               style={{ fontSize: '0.65rem' }}
               title={`Step execution status: ${data.executionStatus}`}
             >
-              {data.executionStatus === 'COMPLETED' ? '✓ OK' : data.executionStatus === 'FAILED' ? '✗ Fail' : 'Running'}
+              {data.executionStatus === 'COMPLETED' ? (
+                '✓ OK'
+              ) : data.executionStatus === 'FAILED' ? (
+                '✗ Fail'
+              ) : (
+                <>
+                  <span className="spinner-border spinner-border-sm" style={{ width: '8px', height: '8px', borderWidth: '1px' }}></span>
+                  Running
+                </>
+              )}
             </span>
           )}
         </div>
