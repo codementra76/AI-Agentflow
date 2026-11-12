@@ -7,6 +7,7 @@ import java.util.List;
 
 public interface WorkflowExecutionService {
     WorkflowExecutionResponse executeWorkflow(Long workflowId, WorkflowExecutionRequest request);
+    WorkflowExecutionResponse executeWorkflow(Long workflowId, WorkflowExecutionRequest request, String triggerType);
     List<WorkflowExecutionResponse> getAllExecutions(Long workflowId, String status);
     WorkflowExecutionResponse getExecutionById(Long executionId);
     List<WorkflowExecutionResponse> getExecutionsByWorkflowId(Long workflowId);

@@ -298,6 +298,16 @@ function AiChat() {
               <span className="d-none d-md-inline">Workflow Builder</span>
             </Link>
 
+            <Link
+              to="/jobs"
+              className="btn btn-outline-light btn-sm d-flex align-items-center gap-1 px-3"
+              id="nav-jobs-link"
+              title="Open Job Search Assistant"
+            >
+              <i className="bi bi-briefcase-fill text-warning"></i>
+              <span className="d-none d-md-inline">Job Search</span>
+            </Link>
+
             {/* Active AI Assistant indicator */}
             <span className="btn btn-primary btn-sm d-flex align-items-center gap-1 px-3 active disabled shadow-sm">
               <i className="bi bi-robot"></i>

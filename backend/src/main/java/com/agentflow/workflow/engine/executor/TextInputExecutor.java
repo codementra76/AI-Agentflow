@@ -45,6 +45,8 @@ public class TextInputExecutor implements NodeExecutor {
 
         if (text == null) {
             text = "";
+        } else if (context != null) {
+            text = context.resolve(text);
         }
 
         result.put("text", text);

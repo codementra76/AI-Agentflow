@@ -14,4 +14,7 @@ public interface WorkflowExecutionRepository extends JpaRepository<WorkflowExecu
     List<WorkflowExecution> findByStatus(String status);
     List<WorkflowExecution> findByStatusOrderByStartedAtDesc(String status);
     List<WorkflowExecution> findByWorkflowIdAndStatusOrderByStartedAtDesc(Long workflowId, String status);
+    boolean existsByWorkflowIdAndStatus(Long workflowId, String status);
+    List<WorkflowExecution> findByTriggerType(String triggerType);
 }
+

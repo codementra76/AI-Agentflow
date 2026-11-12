@@ -22,6 +22,9 @@ public class WorkflowExecution {
     @Column(nullable = false, length = 50)
     private String status = "PENDING";
 
+    @Column(name = "trigger_type", nullable = false, length = 30)
+    private String triggerType = "MANUAL";
+
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "input_data", columnDefinition = "json")
     private JsonNode inputData;
@@ -47,13 +50,19 @@ public class WorkflowExecution {
 
     public WorkflowExecution() {
         this.status = "PENDING";
+        this.triggerType = "MANUAL";
         this.createdAt = Instant.now();
         this.updatedAt = Instant.now();
     }
 
     public WorkflowExecution(Workflow workflow, String status, JsonNode inputData) {
+        this(workflow, status, "MANUAL", inputData);
+    }
+
+    public WorkflowExecution(Workflow workflow, String status, String triggerType, JsonNode inputData) {
         this.workflow = workflow;
         this.status = status != null ? status : "PENDING";
+        this.triggerType = triggerType != null ? triggerType : "MANUAL";
         this.inputData = inputData;
         this.createdAt = Instant.now();
         this.updatedAt = Instant.now();
@@ -146,6 +155,14 @@ public class WorkflowExecution {
         this.createdAt = createdAt;
     }
 
+    public String getTriggerType() {
+        return triggerType;
+    }
+
+    public void setTriggerType(String triggerType) {
+        this.triggerType = triggerType;
+    }
+
     public Instant getUpdatedAt() {
         return updatedAt;
     }
@@ -154,3 +171,4 @@ public class WorkflowExecution {
         this.updatedAt = updatedAt;
     }
 }
+

@@ -48,6 +48,12 @@ public class WorkflowExecutionServiceImpl implements WorkflowExecutionService {
     @Override
     @Transactional
     public WorkflowExecutionResponse executeWorkflow(Long workflowId, WorkflowExecutionRequest request) {
+        return executeWorkflow(workflowId, request, "MANUAL");
+    }
+
+    @Override
+    @Transactional
+    public WorkflowExecutionResponse executeWorkflow(Long workflowId, WorkflowExecutionRequest request, String triggerType) {
         Workflow workflow = workflowRepository.findById(workflowId)
             .orElseThrow(() -> new ResourceNotFoundException("Workflow not found with id: " + workflowId));
 
@@ -59,11 +65,13 @@ public class WorkflowExecutionServiceImpl implements WorkflowExecutionService {
         WorkflowGraph graph = validator.validateAndBuild(workflow.getWorkflowDefinition());
 
         JsonNode inputData = request != null ? request.inputData() : null;
+        String resolvedTriggerType = (triggerType != null && !triggerType.isBlank()) ? triggerType.trim() : "MANUAL";
 
         // Create initial execution record
         WorkflowExecution execution = new WorkflowExecution();
         execution.setWorkflow(workflow);
         execution.setStatus("RUNNING");
+        execution.setTriggerType(resolvedTriggerType);
         execution.setInputData(inputData);
         execution.setStartedAt(Instant.now());
         execution = executionRepository.save(execution);
@@ -137,7 +145,7 @@ public class WorkflowExecutionServiceImpl implements WorkflowExecutionService {
         }
 
         // Re-execute workflow using original input data, generating a new execution record
-        return executeWorkflow(workflow.getId(), new WorkflowExecutionRequest(originalExecution.getInputData()));
+        return executeWorkflow(workflow.getId(), new WorkflowExecutionRequest(originalExecution.getInputData()), "RETRY");
     }
 
     private List<NodeExecutionLogResponse> loadNodeLogs(Long executionId) {

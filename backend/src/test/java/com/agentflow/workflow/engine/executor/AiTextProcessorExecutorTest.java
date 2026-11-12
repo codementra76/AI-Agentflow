@@ -148,4 +148,102 @@ class AiTextProcessorExecutorTest {
             .hasMessageContaining("AI processing failed at node 'ai-node-6'")
             .hasMessageContaining("Connection refused to Ollama");
     }
+
+    @Test
+    @DisplayName("Resolve {{input.field}} reference in AI prompt")
+    void shouldResolveInputReferenceInAiPrompt() {
+        ObjectNode input = objectMapper.createObjectNode();
+        input.put("topic", "Microservices Architecture");
+        context = new ExecutionContext(1L, 100L, input, objectMapper);
+
+        ObjectNode config = objectMapper.createObjectNode();
+        config.put("prompt", "Explain {{input.topic}} in 3 key points.");
+        WorkflowNode node = new WorkflowNode("ai-node-input", NodeType.AI_TEXT_PROCESSOR, "AI Processor", config);
+
+        when(ollamaService.generateChat("Explain Microservices Architecture in 3 key points.", null))
+            .thenReturn(new AiChatResponse("1. Loose coupling 2. Independent deployability 3. Scalability", "qwen2.5:3b"));
+
+        JsonNode result = executor.execute(node, List.of(), context);
+
+        assertThat(result.get("text").asText()).isEqualTo("1. Loose coupling 2. Independent deployability 3. Scalability");
+        verify(ollamaService).generateChat("Explain Microservices Architecture in 3 key points.", null);
+    }
+
+    @Test
+    @DisplayName("Resolve {{nodes.<nodeId>.<field>}} reference from previously executed node output")
+    void shouldResolvePreviousNodeOutputReferenceInAiPrompt() {
+        ObjectNode previousOutput = objectMapper.createObjectNode();
+        previousOutput.put("text", "Draft summary from step 1");
+        context.setNodeOutput("text-1", previousOutput);
+
+        ObjectNode config = objectMapper.createObjectNode();
+        config.put("prompt", "Refine this text: {{nodes.text-1.text}}");
+        WorkflowNode node = new WorkflowNode("ai-node-prev", NodeType.AI_TEXT_PROCESSOR, "AI Processor", config);
+
+        when(ollamaService.generateChat("Refine this text: Draft summary from step 1", null))
+            .thenReturn(new AiChatResponse("Refined summary output", "qwen2.5:3b"));
+
+        JsonNode result = executor.execute(node, List.of("text-1"), context);
+
+        assertThat(result.get("text").asText()).isEqualTo("Refined summary output");
+        verify(ollamaService).generateChat("Refine this text: Draft summary from step 1", null);
+    }
+
+    @Test
+    @DisplayName("Resolve {{variables.<name>}} reference in AI prompt and combine with upstream input")
+    void shouldResolveWorkflowVariableInAiPromptAndCombineWithUpstreamInput() {
+        context.setWorkflowVariable("role", "Senior Java Architect");
+
+        ObjectNode upstreamOutput = objectMapper.createObjectNode();
+        upstreamOutput.put("text", "Explain virtual threads");
+        context.setNodeOutput("src-1", upstreamOutput);
+
+        ObjectNode config = objectMapper.createObjectNode();
+        config.put("prompt", "You are a {{variables.role}}.");
+        WorkflowNode node = new WorkflowNode("ai-node-var", NodeType.AI_TEXT_PROCESSOR, "AI Processor", config);
+
+        when(ollamaService.generateChat(any(), eq(null)))
+            .thenReturn(new AiChatResponse("Virtual threads are lightweight threads.", "qwen2.5:3b"));
+
+        JsonNode result = executor.execute(node, List.of("src-1"), context);
+
+        assertThat(result.get("text").asText()).isEqualTo("Virtual threads are lightweight threads.");
+        verify(ollamaService).generateChat(
+            eq("You are a Senior Java Architect.\n\nInput:\nExplain virtual threads"),
+            eq(null)
+        );
+    }
+
+    @Test
+    @DisplayName("Leave unresolved or missing variable references unchanged in AI prompt")
+    void shouldLeaveMissingReferencesIntactInAiPrompt() {
+        ObjectNode config = objectMapper.createObjectNode();
+        config.put("prompt", "Analyze {{nodes.nonexistent.output}} and {{variables.unknown}}");
+        WorkflowNode node = new WorkflowNode("ai-node-missing", NodeType.AI_TEXT_PROCESSOR, "AI Processor", config);
+
+        when(ollamaService.generateChat("Analyze {{nodes.nonexistent.output}} and {{variables.unknown}}", null))
+            .thenReturn(new AiChatResponse("Handled raw references", "qwen2.5:3b"));
+
+        JsonNode result = executor.execute(node, List.of(), context);
+
+        assertThat(result.get("text").asText()).isEqualTo("Handled raw references");
+        verify(ollamaService).generateChat("Analyze {{nodes.nonexistent.output}} and {{variables.unknown}}", null);
+    }
+
+    @Test
+    @DisplayName("Do not resolve reference to a node that has not executed yet")
+    void shouldNotResolveReferenceToUnexecutedNode() {
+        // Node 'future-node' has not executed, so it's not present in context nodeOutputs
+        ObjectNode config = objectMapper.createObjectNode();
+        config.put("prompt", "Process: {{nodes.future-node.result}}");
+        WorkflowNode node = new WorkflowNode("ai-node-unexecuted", NodeType.AI_TEXT_PROCESSOR, "AI Processor", config);
+
+        when(ollamaService.generateChat("Process: {{nodes.future-node.result}}", null))
+            .thenReturn(new AiChatResponse("Processed with unexecuted reference verbatim", "qwen2.5:3b"));
+
+        JsonNode result = executor.execute(node, List.of(), context);
+
+        assertThat(result.get("text").asText()).isEqualTo("Processed with unexecuted reference verbatim");
+        verify(ollamaService).generateChat("Process: {{nodes.future-node.result}}", null);
+    }
 }

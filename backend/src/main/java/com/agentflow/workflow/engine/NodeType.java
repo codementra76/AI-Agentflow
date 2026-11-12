@@ -5,6 +5,7 @@ public enum NodeType {
     TEXT_INPUT,
     TEXT_TRANSFORM,
     AI_TEXT_PROCESSOR,
+    CONDITION,
     OUTPUT;
 
     public static NodeType fromString(String value) {

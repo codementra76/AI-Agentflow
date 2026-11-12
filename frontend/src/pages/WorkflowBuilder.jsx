@@ -12,6 +12,7 @@ import {
   useReactFlow,
 } from '@xyflow/react';
 import CustomWorkflowNode from '../components/CustomWorkflowNode';
+import ScheduleEditor from '../components/ScheduleEditor';
 import {
   createWorkflow,
   updateWorkflow,
@@ -21,10 +22,11 @@ import {
   getAllExecutions,
   retryExecution,
   setWorkflowActive,
+  getWorkflowSchedule,
   getErrorMessage,
 } from '../services/api';
 
-// 5 Backend supported node types and palette information
+// Backend supported node types and palette information
 const PALETTE_NODES = [
   {
     type: 'MANUAL_TRIGGER',
@@ -51,6 +53,18 @@ const PALETTE_NODES = [
     defaultConfig: { operation: 'UPPERCASE', search: '', replace: '' },
   },
   {
+    type: 'CONDITION',
+    name: 'Condition',
+    icon: 'bi-signpost-split-fill',
+    color: '#d97706',
+    description: 'Branch execution based on condition (True/False)',
+    defaultConfig: {
+      leftOperand: '{{input.score}}',
+      operator: 'GREATER_THAN',
+      rightOperand: '75',
+    },
+  },
+  {
     type: 'AI_TEXT_PROCESSOR',
     name: 'AI Text Processor',
     icon: 'bi-robot',
@@ -70,6 +84,97 @@ const PALETTE_NODES = [
     defaultConfig: {},
   },
 ];
+
+// 10 Supported Condition Operators matching ConditionExecutor in backend
+const CONDITION_OPERATORS = [
+  {
+    value: 'EQUALS',
+    label: 'EQUALS (==)',
+    isUnary: false,
+    description: 'Compares left and right operands. Matches numbers numerically (e.g. 10 == 10.0), booleans (true == True), or strings case-insensitively.',
+  },
+  {
+    value: 'NOT_EQUALS',
+    label: 'NOT EQUALS (!=)',
+    isUnary: false,
+    description: 'Evaluates to TRUE if left operand is not equal to right operand.',
+  },
+  {
+    value: 'GREATER_THAN',
+    label: 'GREATER THAN (>)',
+    isUnary: false,
+    description: 'Evaluates to TRUE if left number is strictly greater than right number. Both operands must resolve to numbers.',
+  },
+  {
+    value: 'GREATER_THAN_OR_EQUAL',
+    label: 'GREATER THAN OR EQUAL (>=)',
+    isUnary: false,
+    description: 'Evaluates to TRUE if left number is greater than or equal to right number. Both operands must resolve to numbers.',
+  },
+  {
+    value: 'LESS_THAN',
+    label: 'LESS THAN (<)',
+    isUnary: false,
+    description: 'Evaluates to TRUE if left number is strictly less than right number. Both operands must resolve to numbers.',
+  },
+  {
+    value: 'LESS_THAN_OR_EQUAL',
+    label: 'LESS THAN OR EQUAL (<=)',
+    isUnary: false,
+    description: 'Evaluates to TRUE if left number is less than or equal to right number. Both operands must resolve to numbers.',
+  },
+  {
+    value: 'CONTAINS',
+    label: 'CONTAINS',
+    isUnary: false,
+    description: 'Evaluates to TRUE if left text contains right substring (case-insensitive) or left array contains right element.',
+  },
+  {
+    value: 'NOT_CONTAINS',
+    label: 'NOT CONTAINS',
+    isUnary: false,
+    description: 'Evaluates to TRUE if left text or array does not contain right operand.',
+  },
+  {
+    value: 'IS_EMPTY',
+    label: 'IS EMPTY (Unary)',
+    isUnary: true,
+    description: 'Evaluates to TRUE if left operand is null, undefined, blank text, empty array [], or empty object {}. Right operand is not required.',
+  },
+  {
+    value: 'IS_NOT_EMPTY',
+    label: 'IS NOT EMPTY (Unary)',
+    isUnary: true,
+    description: 'Evaluates to TRUE if left operand contains a non-empty value. Right operand is not required.',
+  },
+];
+
+// Variable name validation rule: starts with letter or underscore, followed by letters, digits, or underscores
+const VAR_NAME_REGEX = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+
+// Example workflow variables for quick insertion
+const EXAMPLE_WORKFLOW_VARIABLES = [
+  { key: 'candidateName', value: 'Alice Smith', description: 'Applicant name' },
+  { key: 'targetRole', value: 'Senior Java Architect', description: 'Target job title' },
+  { key: 'company', value: 'Acme Corporation', description: 'Company name' },
+];
+
+function getVariableValidationError(key, allVars, currentIndex) {
+  const trimmed = (key || '').trim();
+  if (!trimmed) {
+    return 'Variable name cannot be empty.';
+  }
+  if (!VAR_NAME_REGEX.test(trimmed)) {
+    return 'Must start with a letter/underscore; letters, numbers, and underscores only.';
+  }
+  const isDuplicate = allVars.some(
+    (v, i) => i !== currentIndex && (v.key || '').trim().toLowerCase() === trimmed.toLowerCase()
+  );
+  if (isDuplicate) {
+    return `Duplicate variable name '${trimmed}'. Names must be unique.`;
+  }
+  return null;
+}
 
 // Inner Canvas Component that has access to useReactFlow hook
 function WorkflowCanvasInner() {
@@ -105,15 +210,23 @@ function WorkflowCanvasInner() {
   const [isRetrying, setIsRetrying] = useState(false);
   const [showExecutePrompt, setShowExecutePrompt] = useState(null); // { type: 'unSavedWorkflow' | 'inactive' | 'unsaved', title: '', message: '' }
   const [lastSavedSnapshot, setLastSavedSnapshot] = useState(null);
+  const [executionInputJson, setExecutionInputJson] = useState('{"score": 85}');
+
+  // Workflow Variables state
+  const [variables, setVariables] = useState([]); // Array of { id: string, key: string, value: string }
+  const [activeSideTab, setActiveSideTab] = useState('node'); // 'node' | 'variables' | 'schedule'
+  const [activeSchedule, setActiveSchedule] = useState(null); // WorkflowSchedule object if configured
+  const [copiedVarKey, setCopiedVarKey] = useState(null);
 
   const reactFlowWrapper = useRef(null);
   const { screenToFlowPosition, fitView, getNodes, getEdges } = useReactFlow();
 
   // Unique ID counter generator
   const idCounterRef = useRef(1);
+  const varIdCounterRef = useRef(1);
 
-  // Helper to compute a normalized string snapshot of the workflow graph
-  const computeSnapshot = useCallback((name, desc, active, nds, eds) => {
+  // Helper to compute a normalized string snapshot of the workflow graph including variables
+  const computeSnapshot = useCallback((name, desc, active, nds, eds, vars) => {
     const serializedNodes = (nds || []).map((n) => ({
       id: String(n.id),
       type: n.data?.type,
@@ -127,6 +240,12 @@ function WorkflowCanvasInner() {
     const serializedEdges = (eds || []).map((e) => ({
       source: String(e.source),
       target: String(e.target),
+      sourceHandle: e.sourceHandle ? String(e.sourceHandle) : undefined,
+      label: e.label ? String(e.label) : undefined,
+    }));
+    const serializedVars = (vars || []).map((v) => ({
+      key: (v.key || '').trim(),
+      value: v.value ?? '',
     }));
     return JSON.stringify({
       name: (name || '').trim(),
@@ -134,6 +253,7 @@ function WorkflowCanvasInner() {
       active: !!active,
       nodes: serializedNodes,
       edges: serializedEdges,
+      variables: serializedVars,
     });
   }, []);
 
@@ -142,9 +262,50 @@ function WorkflowCanvasInner() {
     if (!loadedWorkflowId || !lastSavedSnapshot) return false;
     const currentNodes = getNodes && getNodes().length > 0 ? getNodes() : nodes;
     const currentEdges = getEdges ? getEdges() : edges;
-    const current = computeSnapshot(workflowName, workflowDescription, isActive, currentNodes, currentEdges);
+    const current = computeSnapshot(workflowName, workflowDescription, isActive, currentNodes, currentEdges, variables);
     return current !== lastSavedSnapshot;
-  }, [loadedWorkflowId, lastSavedSnapshot, workflowName, workflowDescription, isActive, nodes, edges, getNodes, getEdges, computeSnapshot]);
+  }, [loadedWorkflowId, lastSavedSnapshot, workflowName, workflowDescription, isActive, nodes, edges, variables, getNodes, getEdges, computeSnapshot]);
+
+  // Handlers for workflow variables
+  const handleAddVariable = (key = '', value = '') => {
+    const newId = `var-${varIdCounterRef.current++}`;
+    setVariables((prev) => [...prev, { id: newId, key, value }]);
+    setActiveSideTab('variables');
+  };
+
+  const handleUpdateVariable = (id, field, val) => {
+    setVariables((prev) =>
+      prev.map((v) => (v.id === id ? { ...v, [field]: val } : v))
+    );
+  };
+
+  const handleRemoveVariable = (id) => {
+    setVariables((prev) => prev.filter((v) => v.id !== id));
+  };
+
+  const handleAddExampleVariable = (example) => {
+    const exists = variables.some(
+      (v) => (v.key || '').trim().toLowerCase() === example.key.toLowerCase()
+    );
+    if (!exists) {
+      handleAddVariable(example.key, example.value);
+    } else {
+      setNotification({
+        type: 'warning',
+        message: `Variable '${example.key}' already exists in this workflow.`,
+      });
+    }
+  };
+
+  const handleCopyVariableReference = (key) => {
+    if (!key) return;
+    const ref = `{{variables.${key.trim()}}}`;
+    if (navigator?.clipboard?.writeText) {
+      navigator.clipboard.writeText(ref);
+      setCopiedVarKey(key);
+      setTimeout(() => setCopiedVarKey(null), 2000);
+    }
+  };
 
   // Load execution history for current workflow from backend with optional status filter
   const loadExecutionHistory = useCallback(async (wfId, filter = historyFilter) => {
@@ -269,23 +430,57 @@ function WorkflowCanvasInner() {
     }
 
     setEdges((eds) => {
-      // Prevent duplicate connections between same source and target
+      // Prevent duplicate connections between same source, sourceHandle, and target
       const exists = eds.some(
-        (e) => e.source === connection.source && e.target === connection.target
+        (e) =>
+          e.source === connection.source &&
+          e.target === connection.target &&
+          (e.sourceHandle || null) === (connection.sourceHandle || null)
       );
       if (exists) {
         setNotification({
           type: 'info',
-          message: 'Connection already exists between these nodes.',
+          message: 'Connection already exists between these nodes on this handle.',
         });
         return eds;
       }
+
+      const isTrueHandle = connection.sourceHandle === 'true';
+      const isFalseHandle = connection.sourceHandle === 'false';
+
+      const edgeStyle = isTrueHandle
+        ? { stroke: '#198754', strokeWidth: 2.5 }
+        : isFalseHandle
+        ? { stroke: '#dc3545', strokeWidth: 2.5 }
+        : { stroke: '#4f46e5', strokeWidth: 2 };
+
+      const edgeLabel = isTrueHandle ? 'TRUE' : isFalseHandle ? 'FALSE' : undefined;
+      const labelStyle = isTrueHandle
+        ? { fill: '#198754', fontWeight: 700, fontSize: 11 }
+        : isFalseHandle
+        ? { fill: '#dc3545', fontWeight: 700, fontSize: 11 }
+        : undefined;
+      const labelBgStyle = isTrueHandle
+        ? { fill: '#d1e7dd', fillOpacity: 0.95 }
+        : isFalseHandle
+        ? { fill: '#f8d7da', fillOpacity: 0.95 }
+        : undefined;
+
+      const edgeId = connection.sourceHandle
+        ? `e-${connection.source}-${connection.sourceHandle}-${connection.target}`
+        : `e-${connection.source}-${connection.target}`;
+
       return addEdge(
         {
           ...connection,
-          id: `e-${connection.source}-${connection.target}`,
+          id: edgeId,
           animated: true,
-          style: { stroke: '#4f46e5', strokeWidth: 2 },
+          label: edgeLabel,
+          labelStyle,
+          labelBgStyle,
+          labelBgPadding: isTrueHandle || isFalseHandle ? [6, 3] : undefined,
+          labelBgBorderRadius: isTrueHandle || isFalseHandle ? 4 : undefined,
+          style: edgeStyle,
         },
         eds
       );
@@ -322,6 +517,20 @@ function WorkflowCanvasInner() {
           const definition = wf.workflowDefinition || {};
           const rawNodes = Array.isArray(definition.nodes) ? definition.nodes : [];
           const rawEdges = Array.isArray(definition.edges) ? definition.edges : [];
+          const rawVariables =
+            definition.variables &&
+            typeof definition.variables === 'object' &&
+            !Array.isArray(definition.variables)
+              ? definition.variables
+              : {};
+
+          const mappedVariables = Object.entries(rawVariables).map(([key, val], idx) => ({
+            id: `var-${idx + 1}`,
+            key,
+            value: typeof val === 'object' ? JSON.stringify(val) : String(val ?? ''),
+          }));
+          varIdCounterRef.current = mappedVariables.length + 1;
+          setVariables(mappedVariables);
 
           // Map backend nodes into React Flow nodes
           const mappedNodes = rawNodes.map((n) => {
@@ -341,23 +550,57 @@ function WorkflowCanvasInner() {
           });
 
           // Map backend edges into React Flow edges
-          const mappedEdges = rawEdges.map((e, index) => ({
-            id: `e-${e.source}-${e.target}-${index}`,
-            source: e.source,
-            target: e.target,
-            animated: true,
-            style: { stroke: '#4f46e5', strokeWidth: 2 },
-          }));
+          const mappedEdges = rawEdges.map((e, index) => {
+            const isTrue = e.sourceHandle === 'true';
+            const isFalse = e.sourceHandle === 'false';
+            return {
+              id: e.id || `e-${e.source}-${e.target}-${index}`,
+              source: e.source,
+              target: e.target,
+              sourceHandle: e.sourceHandle || undefined,
+              label: e.label || (isTrue ? 'TRUE' : isFalse ? 'FALSE' : undefined),
+              labelStyle: isTrue
+                ? { fill: '#198754', fontWeight: 700, fontSize: 11 }
+                : isFalse
+                ? { fill: '#dc3545', fontWeight: 700, fontSize: 11 }
+                : undefined,
+              labelBgStyle: isTrue
+                ? { fill: '#d1e7dd', fillOpacity: 0.95 }
+                : isFalse
+                ? { fill: '#f8d7da', fillOpacity: 0.95 }
+                : undefined,
+              labelBgPadding: isTrue || isFalse ? [6, 3] : undefined,
+              labelBgBorderRadius: isTrue || isFalse ? 4 : undefined,
+              animated: true,
+              style: isTrue
+                ? { stroke: '#198754', strokeWidth: 2.5 }
+                : isFalse
+                ? { stroke: '#dc3545', strokeWidth: 2.5 }
+                : { stroke: '#4f46e5', strokeWidth: 2 },
+            };
+          });
 
           setNodes(mappedNodes);
           setEdges(mappedEdges);
 
           // Take snapshot of loaded workflow to track unsaved changes
-          const loadedSnapshot = computeSnapshot(wf.name, wf.description, wf.active ?? true, mappedNodes, mappedEdges);
+          const loadedSnapshot = computeSnapshot(wf.name, wf.description, wf.active ?? true, mappedNodes, mappedEdges, mappedVariables);
           setLastSavedSnapshot(loadedSnapshot);
 
           // Load execution history from backend
           loadExecutionHistory(wf.id);
+
+          // Load schedule configuration if configured
+          try {
+            const schedRes = await getWorkflowSchedule(wf.id);
+            if (schedRes && schedRes.success && schedRes.data) {
+              setActiveSchedule(schedRes.data);
+            } else {
+              setActiveSchedule(null);
+            }
+          } catch {
+            setActiveSchedule(null);
+          }
 
           // Update idCounterRef to avoid ID collisions with new nodes
           let maxCounter = 1;
@@ -415,8 +658,8 @@ function WorkflowCanvasInner() {
       const source = sortedNodes[i];
       const target = sortedNodes[i + 1];
 
-      // Disallow OUTPUT as source or MANUAL_TRIGGER as target
-      if (source.data?.type === 'OUTPUT' || target.data?.type === 'MANUAL_TRIGGER') {
+      // Disallow OUTPUT as source, MANUAL_TRIGGER as target, and CONDITION as source (requires explicit TRUE/FALSE handles)
+      if (source.data?.type === 'OUTPUT' || target.data?.type === 'MANUAL_TRIGGER' || source.data?.type === 'CONDITION') {
         continue;
       }
       if (source.id === target.id) continue;
@@ -525,7 +768,10 @@ function WorkflowCanvasInner() {
     setIsActive(true);
     setNodes(templateNodes);
     setEdges(templateEdges);
+    setVariables([]);
+    setActiveSchedule(null);
     setSelectedNodeId('ai-1');
+    setActiveSideTab('node');
     setExecutionResult(null);
     setExecutionError(null);
     setShowResultsPanel(false);
@@ -553,6 +799,7 @@ function WorkflowCanvasInner() {
   // Node selection handler
   const onNodeClick = useCallback((_, node) => {
     setSelectedNodeId(node.id);
+    setActiveSideTab('node');
   }, []);
 
   // Deselect node on clicking canvas background
@@ -747,6 +994,49 @@ function WorkflowCanvasInner() {
         });
         return;
       }
+      const sourceNode = currentNodes.find((n) => n.id === edge.source);
+      if (sourceNode?.data?.type === 'CONDITION' && !edge.sourceHandle) {
+        setSaveStatus({
+          type: 'danger',
+          message: `Outgoing connection from Condition node '${sourceNode.data?.name || edge.source}' must originate from either the TRUE or FALSE handle.`,
+        });
+        return;
+      }
+    }
+
+    // 3b. Validate workflow variables
+    const serializedVariables = {};
+    const seenVarKeys = new Set();
+    for (let i = 0; i < variables.length; i++) {
+      const v = variables[i];
+      const trimmedKey = (v.key || '').trim();
+      if (!trimmedKey) {
+        setSaveStatus({
+          type: 'danger',
+          message: 'Workflow variable names cannot be empty. Please enter a name or remove the empty variable.',
+        });
+        setActiveSideTab('variables');
+        return;
+      }
+      if (!VAR_NAME_REGEX.test(trimmedKey)) {
+        setSaveStatus({
+          type: 'danger',
+          message: `Invalid variable name '${trimmedKey}'. Must start with a letter/underscore and contain only letters, numbers, and underscores.`,
+        });
+        setActiveSideTab('variables');
+        return;
+      }
+      const lowerKey = trimmedKey.toLowerCase();
+      if (seenVarKeys.has(lowerKey)) {
+        setSaveStatus({
+          type: 'danger',
+          message: `Duplicate variable name detected: '${trimmedKey}'. Workflow variable names must be unique.`,
+        });
+        setActiveSideTab('variables');
+        return;
+      }
+      seenVarKeys.add(lowerKey);
+      serializedVariables[trimmedKey] = v.value ?? '';
     }
 
     // 4. Serialize nodes matching backend WorkflowNode structure
@@ -761,11 +1051,21 @@ function WorkflowCanvasInner() {
       },
     }));
 
-    // 5. Serialize edges matching backend WorkflowEdge structure: { source, target }
-    const serializedEdges = currentEdges.map((edge) => ({
-      source: String(edge.source),
-      target: String(edge.target),
-    }));
+    // 5. Serialize edges matching backend WorkflowEdge structure: { id, source, target, sourceHandle, label }
+    const serializedEdges = currentEdges.map((edge) => {
+      const e = {
+        id: edge.id || `e-${edge.source}-${edge.target}`,
+        source: String(edge.source),
+        target: String(edge.target),
+      };
+      if (edge.sourceHandle) {
+        e.sourceHandle = String(edge.sourceHandle);
+      }
+      if (edge.label) {
+        e.label = String(edge.label);
+      }
+      return e;
+    });
 
     // 6. Construct payload conforming strictly to backend DTO
     const payload = {
@@ -775,6 +1075,7 @@ function WorkflowCanvasInner() {
       workflowDefinition: {
         nodes: serializedNodes,
         edges: serializedEdges,
+        variables: serializedVariables,
       },
     };
 
@@ -795,6 +1096,9 @@ function WorkflowCanvasInner() {
         const resultId = response.data.id;
         const savedNodesCount = response.data.workflowDefinition?.nodes?.length ?? serializedNodes.length;
         const savedEdgesCount = response.data.workflowDefinition?.edges?.length ?? serializedEdges.length;
+        const savedVariablesCount = response.data.workflowDefinition?.variables
+          ? Object.keys(response.data.workflowDefinition.variables).length
+          : Object.keys(serializedVariables).length;
 
         // If this was a new workflow, track its ID so further saves update it
         if (!isUpdating) {
@@ -802,14 +1106,15 @@ function WorkflowCanvasInner() {
         }
 
         // Update snapshot to mark clean saved state
-        const savedSnapshot = computeSnapshot(trimmedName, workflowDescription, isActive, currentNodes, currentEdges);
+        const savedSnapshot = computeSnapshot(trimmedName, workflowDescription, isActive, currentNodes, currentEdges, variables);
         setLastSavedSnapshot(savedSnapshot);
 
+        const varMsgPart = savedVariablesCount > 0 ? `, ${savedVariablesCount} variables` : '';
         setSaveStatus({
           type: 'success',
           message: isUpdating
-            ? `Changes saved successfully for Workflow #${resultId}! (${savedNodesCount} nodes, ${savedEdgesCount} connections persisted)`
-            : `Workflow saved successfully! Workflow ID: ${resultId} (${savedNodesCount} nodes, ${savedEdgesCount} connections persisted)`,
+            ? `Changes saved successfully for Workflow #${resultId}! (${savedNodesCount} nodes, ${savedEdgesCount} connections${varMsgPart} persisted)`
+            : `Workflow saved successfully! Workflow ID: ${resultId} (${savedNodesCount} nodes, ${savedEdgesCount} connections${varMsgPart} persisted)`,
           savedId: resultId,
         });
 
@@ -844,6 +1149,16 @@ function WorkflowCanvasInner() {
     setShowResultsPanel(true);
     setResultsTab('output');
 
+    // Parse runtime input data if provided
+    let inputDataPayload = null;
+    if (executionInputJson && executionInputJson.trim()) {
+      try {
+        inputDataPayload = JSON.parse(executionInputJson.trim());
+      } catch {
+        inputDataPayload = { text: executionInputJson.trim() };
+      }
+    }
+
     // Immediately mark canvas nodes as RUNNING for active visual feedback
     setNodes((nds) =>
       nds.map((node) => ({
@@ -856,7 +1171,7 @@ function WorkflowCanvasInner() {
     );
 
     try {
-      const response = await executeWorkflow(workflowIdToExecute);
+      const response = await executeWorkflow(workflowIdToExecute, inputDataPayload);
       if (response && response.success && response.data) {
         const executionData = response.data;
         setExecutionResult(executionData);
@@ -955,6 +1270,15 @@ function WorkflowCanvasInner() {
             </Link>
 
             <Link
+              to="/jobs"
+              className="btn btn-outline-light btn-sm d-flex align-items-center gap-2"
+              title="Open Job Search Assistant"
+            >
+              <i className="bi bi-briefcase-fill text-warning"></i>
+              <span className="d-none d-sm-inline">Job Search</span>
+            </Link>
+
+            <Link
               to="/chat"
               className="btn btn-outline-info btn-sm d-flex align-items-center gap-2"
               title="Open local AI Assistant"
@@ -988,8 +1312,11 @@ function WorkflowCanvasInner() {
                       setWorkflowDescription('');
                       setNodes([]);
                       setEdges([]);
+                      setVariables([]);
+                      setActiveSideTab('node');
                       setSaveStatus(null);
                       idCounterRef.current = 1;
+                      varIdCounterRef.current = 1;
                     }}
                   >
                     <i className="bi bi-plus-circle me-1"></i>
@@ -1347,6 +1674,41 @@ function WorkflowCanvasInner() {
               </button>
             )}
 
+            {/* Workflow Variables Button */}
+            <button
+              id="toolbar-variables-btn"
+              className={`btn btn-sm ${activeSideTab === 'variables' ? 'btn-primary' : 'btn-outline-secondary'} d-flex align-items-center gap-1`}
+              onClick={() => setActiveSideTab('variables')}
+              title="Configure Workflow Variables (reusable {{variables.name}} values)"
+            >
+              <i className="bi bi-braces-asterisk"></i>
+              <span className="d-none d-md-inline">Variables</span>
+              {variables.length > 0 && (
+                <span className={`badge ${activeSideTab === 'variables' ? 'bg-light text-dark' : 'bg-primary'} ms-1`}>
+                  {variables.length}
+                </span>
+              )}
+            </button>
+
+            {/* Schedule Studio Button */}
+            <button
+              id="toolbar-schedule-btn"
+              className={`btn btn-sm ${activeSideTab === 'schedule' ? 'btn-primary' : 'btn-outline-secondary'} d-flex align-items-center gap-1`}
+              onClick={() => setActiveSideTab('schedule')}
+              title="Configure Automated Execution Schedule (Daily, Weekly, One-Time)"
+            >
+              <i className="bi bi-clock-history"></i>
+              <span className="d-none d-md-inline">Schedule</span>
+              {activeSchedule && (
+                <span
+                  className={`badge ${activeSchedule.enabled ? 'bg-success' : 'bg-secondary'} ms-1`}
+                  style={{ fontSize: '0.65rem' }}
+                >
+                  {activeSchedule.enabled ? 'Active' : 'Paused'}
+                </span>
+              )}
+            </button>
+
             {selectedNode && (
               <button
                 className="btn btn-outline-danger btn-sm d-flex align-items-center gap-1"
@@ -1573,6 +1935,57 @@ function WorkflowCanvasInner() {
                 {/* Tab 1: Output & Overview */}
                 {resultsTab === 'output' && (
                   <div>
+                    {/* Workflow Execution Input Control with Presets */}
+                    <div className="card shadow-sm border rounded-3 bg-white p-2 px-3 mb-3">
+                      <div className="d-flex align-items-center justify-content-between mb-1">
+                        <span className="text-secondary small fw-bold text-uppercase d-flex align-items-center gap-1" style={{ fontSize: '0.7rem' }}>
+                          <i className="bi bi-input-cursor-text text-primary"></i>
+                          Execution Input Data (JSON)
+                        </span>
+                        <div className="d-flex align-items-center gap-1">
+                          <span className="text-muted small me-1" style={{ fontSize: '0.68rem' }}>Branch Presets:</span>
+                          <button
+                            type="button"
+                            className="btn btn-outline-success btn-sm py-0 px-2"
+                            style={{ fontSize: '0.68rem' }}
+                            onClick={() => setExecutionInputJson('{"score": 85}')}
+                            title='Set input: {"score": 85} (TRUE Branch)'
+                          >
+                            Score: 85 (True)
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-outline-danger btn-sm py-0 px-2"
+                            style={{ fontSize: '0.68rem' }}
+                            onClick={() => setExecutionInputJson('{"score": 45}')}
+                            title='Set input: {"score": 45} (FALSE Branch)'
+                          >
+                            Score: 45 (False)
+                          </button>
+                        </div>
+                      </div>
+                      <div className="input-group input-group-sm">
+                        <input
+                          id="execution-input-field"
+                          type="text"
+                          className="form-control font-monospace"
+                          style={{ fontSize: '0.78rem' }}
+                          value={executionInputJson}
+                          onChange={(e) => setExecutionInputJson(e.target.value)}
+                          placeholder='{"score": 85}'
+                        />
+                        <button
+                          id="run-with-input-btn"
+                          className="btn btn-primary btn-sm d-flex align-items-center gap-1 px-3 fw-semibold"
+                          onClick={() => handleExecuteClick()}
+                          disabled={isExecuting || isLoadingWorkflow}
+                          title="Execute workflow with this JSON input"
+                        >
+                          <i className="bi bi-play-fill"></i>
+                          <span>Run Execution</span>
+                        </button>
+                      </div>
+                    </div>
                     {isExecuting ? (
                       <div className="card shadow-sm border-0 rounded-3 bg-white p-4 text-center my-3">
                         <div className="spinner-border text-info mx-auto mb-3" role="status" style={{ width: '2.5rem', height: '2.5rem' }}>
@@ -1776,15 +2189,37 @@ function WorkflowCanvasInner() {
                                           ? 'bg-success-subtle text-success border border-success-subtle'
                                           : log.status === 'FAILED'
                                           ? 'bg-danger-subtle text-danger border border-danger-subtle'
+                                          : log.status === 'SKIPPED'
+                                          ? 'bg-secondary-subtle text-secondary border border-secondary-subtle'
                                           : 'bg-primary-subtle text-primary border border-primary-subtle'
                                       }`}
                                     >
-                                      {log.status === 'COMPLETED' ? '✓ COMPLETED' : log.status === 'FAILED' ? '✗ FAILED' : log.status}
+                                      {log.status === 'COMPLETED'
+                                        ? '✓ COMPLETED'
+                                        : log.status === 'FAILED'
+                                        ? '✗ FAILED'
+                                        : log.status === 'SKIPPED'
+                                        ? '⊘ SKIPPED'
+                                        : log.status}
                                     </span>
                                   </td>
                                   <td className="font-monospace text-muted small">{duration}</td>
                                   <td className="font-monospace text-break" style={{ maxWidth: '420px' }}>
-                                    {log.errorMessage ? (
+                                    {log.status === 'SKIPPED' ? (
+                                      <span className="text-secondary fst-italic">
+                                        <i className="bi bi-slash-circle me-1"></i>
+                                        {log.outputData?.reason || 'Branch not taken (skipped)'}
+                                      </span>
+                                    ) : log.nodeType === 'CONDITION' && log.outputData ? (
+                                      <div>
+                                        <span className={`badge me-2 ${log.outputData.branch === 'TRUE' ? 'bg-success' : 'bg-danger'}`}>
+                                          Branch: {log.outputData.branch}
+                                        </span>
+                                        <span className="text-muted small">
+                                          ({log.outputData.operator} evaluated to {String(log.outputData.result)})
+                                        </span>
+                                      </div>
+                                    ) : log.errorMessage ? (
                                       <span className="text-danger">{log.errorMessage}</span>
                                     ) : log.outputData ? (
                                       <span className="text-dark">
@@ -1949,16 +2384,42 @@ function WorkflowCanvasInner() {
         {/* Right Column: Properties & Configuration Panel */}
         <aside
           className="bg-white border-start d-flex flex-column p-3 flex-shrink-0 shadow-sm"
-          style={{ width: '300px', zIndex: 10 }}
+          style={{ width: '330px', zIndex: 10 }}
         >
+          {/* Right Column Header: Tabs between Node Config, Workflow Variables & Schedule */}
           <div className="d-flex align-items-center justify-content-between mb-3 border-bottom pb-2">
-            <h6 className="fw-bold text-dark text-uppercase small mb-0">
-              <i className="bi bi-sliders text-primary me-2"></i>
-              Configuration
-            </h6>
-            {selectedNode && (
+            <div className="btn-group btn-group-sm w-100" role="group">
               <button
-                className="btn btn-link btn-sm text-muted p-0"
+                type="button"
+                id="tab-node-config"
+                className={`btn btn-sm ${activeSideTab === 'node' ? 'btn-primary' : 'btn-outline-secondary'}`}
+                onClick={() => setActiveSideTab('node')}
+              >
+                <i className="bi bi-sliders me-1"></i>
+                Node Config
+              </button>
+              <button
+                type="button"
+                id="tab-workflow-variables"
+                className={`btn btn-sm ${activeSideTab === 'variables' ? 'btn-primary' : 'btn-outline-secondary'}`}
+                onClick={() => setActiveSideTab('variables')}
+              >
+                <i className="bi bi-braces-asterisk me-1"></i>
+                Variables {variables.length > 0 ? `(${variables.length})` : ''}
+              </button>
+              <button
+                type="button"
+                id="tab-workflow-schedule"
+                className={`btn btn-sm ${activeSideTab === 'schedule' ? 'btn-primary' : 'btn-outline-secondary'}`}
+                onClick={() => setActiveSideTab('schedule')}
+              >
+                <i className="bi bi-clock-history me-1"></i>
+                Schedule
+              </button>
+            </div>
+            {activeSideTab === 'node' && selectedNode && (
+              <button
+                className="btn btn-link btn-sm text-muted p-0 ms-2"
                 onClick={() => setSelectedNodeId(null)}
                 title="Deselect"
               >
@@ -1967,7 +2428,198 @@ function WorkflowCanvasInner() {
             )}
           </div>
 
-          {selectedNode ? (
+          {activeSideTab === 'schedule' ? (
+            /* Workflow Schedule Studio Section */
+            <ScheduleEditor
+              workflowId={loadedWorkflowId}
+              isWorkflowActive={isActive}
+              onScheduleUpdated={(sched) => {
+                setActiveSchedule(sched);
+              }}
+            />
+          ) : activeSideTab === 'variables' ? (
+            /* Workflow Variables Management Section */
+            <div className="d-flex flex-column gap-3 overflow-auto pe-1 flex-grow-1">
+              <div className="d-flex align-items-center justify-content-between">
+                <div>
+                  <h6 className="fw-bold text-dark small mb-0">Workflow Variables</h6>
+                  <span className="text-muted" style={{ fontSize: '0.72rem' }}>
+                    Reusable dynamic context values
+                  </span>
+                </div>
+                <button
+                  id="add-variable-btn"
+                  type="button"
+                  className="btn btn-primary btn-sm py-1 px-2 d-flex align-items-center gap-1 shadow-sm"
+                  style={{ fontSize: '0.75rem' }}
+                  onClick={() => handleAddVariable()}
+                >
+                  <i className="bi bi-plus-lg"></i>
+                  <span>Add Variable</span>
+                </button>
+              </div>
+
+              {/* Explanatory Banner */}
+              <div className="card bg-info-subtle border-info-subtle p-2 rounded-2">
+                <div className="d-flex align-items-start gap-2">
+                  <i className="bi bi-info-circle-fill text-info fs-6 mt-1 flex-shrink-0"></i>
+                  <div style={{ fontSize: '0.72rem', lineHeight: '1.35' }}>
+                    <span className="fw-bold text-dark">How to reference variables:</span>
+                    <div className="text-muted mt-1">
+                      Reference variables anywhere in AI prompts or text inputs as{' '}
+                      <code className="text-primary fw-bold">{'{{variables.variableName}}'}</code>.
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Quick Examples Bar */}
+              <div className="bg-light p-2 rounded-2 border">
+                <div className="d-flex align-items-center justify-content-between mb-1">
+                  <span className="fw-bold text-secondary text-uppercase small" style={{ fontSize: '0.68rem' }}>
+                    <i className="bi bi-lightning-charge-fill text-warning me-1"></i>
+                    Suggested Examples:
+                  </span>
+                </div>
+                <div className="d-flex flex-wrap gap-1">
+                  {EXAMPLE_WORKFLOW_VARIABLES.map((ex) => (
+                    <button
+                      key={ex.key}
+                      type="button"
+                      className="badge bg-white text-dark border text-decoration-none btn btn-sm py-1 px-2"
+                      style={{ fontSize: '0.68rem', cursor: 'pointer' }}
+                      onClick={() => handleAddExampleVariable(ex)}
+                      title={`Add example: ${ex.key} = "${ex.value}" (${ex.description})`}
+                    >
+                      + {ex.key}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Variables List */}
+              {variables.length > 0 ? (
+                <div className="d-flex flex-column gap-2">
+                  {variables.map((v, idx) => {
+                    const validationError = getVariableValidationError(v.key, variables, idx);
+                    const isCopied = copiedVarKey === v.key;
+                    return (
+                      <div
+                        key={v.id}
+                        className={`card border p-2 rounded-2 shadow-sm ${validationError ? 'border-danger' : 'border-light-subtle'}`}
+                        style={{ backgroundColor: validationError ? '#fff8f8' : '#fff' }}
+                      >
+                        <div className="d-flex align-items-center justify-content-between mb-1">
+                          <span className="badge bg-light text-secondary border font-monospace" style={{ fontSize: '0.65rem' }}>
+                            #{idx + 1}
+                          </span>
+                          <div className="d-flex align-items-center gap-1">
+                            {v.key?.trim() && (
+                              <button
+                                type="button"
+                                className="btn btn-link btn-sm p-0 text-decoration-none font-monospace small"
+                                style={{ fontSize: '0.68rem' }}
+                                onClick={() => handleCopyVariableReference(v.key)}
+                                title="Click to copy {{variables.<name>}} placeholder"
+                              >
+                                <code className="text-primary">{`{{variables.${v.key.trim()}}}`}</code>
+                                <i className={`bi ${isCopied ? 'bi-check-lg text-success' : 'bi-clipboard'} ms-1`}></i>
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              className="btn btn-outline-danger btn-sm p-0 ms-1 d-flex align-items-center justify-content-center"
+                              style={{ width: '22px', height: '22px' }}
+                              onClick={() => handleRemoveVariable(v.id)}
+                              title="Delete variable"
+                            >
+                              <i className="bi bi-x-lg" style={{ fontSize: '0.7rem' }}></i>
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Variable Name Input */}
+                        <div className="mb-1">
+                          <label className="form-label text-muted small mb-0 fw-semibold" style={{ fontSize: '0.68rem' }}>
+                            Name
+                          </label>
+                          <input
+                            type="text"
+                            className={`form-control form-control-sm font-monospace py-1 ${
+                              validationError ? 'is-invalid' : ''
+                            }`}
+                            style={{ fontSize: '0.78rem' }}
+                            placeholder="e.g. targetRole"
+                            value={v.key}
+                            onChange={(e) => handleUpdateVariable(v.id, 'key', e.target.value)}
+                          />
+                          {validationError && (
+                            <div className="text-danger small mt-1" style={{ fontSize: '0.68rem' }}>
+                              {validationError}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Variable Value Input */}
+                        <div>
+                          <label className="form-label text-muted small mb-0 fw-semibold" style={{ fontSize: '0.68rem' }}>
+                            Value
+                          </label>
+                          <input
+                            type="text"
+                            className="form-control form-control-sm py-1"
+                            style={{ fontSize: '0.78rem' }}
+                            placeholder="e.g. Senior Java Architect"
+                            value={v.value}
+                            onChange={(e) => handleUpdateVariable(v.id, 'value', e.target.value)}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  <button
+                    type="button"
+                    className="btn btn-outline-primary btn-sm w-100 py-1 d-flex align-items-center justify-content-center gap-1 mt-1"
+                    style={{ fontSize: '0.75rem' }}
+                    onClick={() => handleAddVariable()}
+                  >
+                    <i className="bi bi-plus-circle"></i>
+                    <span>Add Another Variable</span>
+                  </button>
+                </div>
+              ) : (
+                <div className="text-center text-muted py-4 px-2 bg-light rounded-3 border">
+                  <i className="bi bi-braces-asterisk fs-2 d-block mb-2 text-secondary opacity-50"></i>
+                  <h6 className="fw-semibold small text-dark mb-1">No Variables Defined</h6>
+                  <p className="small mb-3" style={{ fontSize: '0.72rem' }}>
+                    Workflow variables allow you to set reusable values (e.g. role, company, topic) and interpolate them across your pipeline.
+                  </p>
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-sm px-3 shadow-sm"
+                    style={{ fontSize: '0.75rem' }}
+                    onClick={() => handleAddVariable()}
+                  >
+                    <i className="bi bi-plus-lg me-1"></i>
+                    Create First Variable
+                  </button>
+                </div>
+              )}
+
+              {/* Usage Hints in Nodes */}
+              <div className="card bg-light border p-2 rounded-2 mt-auto text-muted" style={{ fontSize: '0.7rem' }}>
+                <div className="fw-bold text-dark mb-1">
+                  <i className="bi bi-lightbulb-fill text-warning me-1"></i>
+                  Using Variables in Nodes:
+                </div>
+                <div>&bull; <strong>TEXT_INPUT</strong>: Type <code>{'{{variables.varName}}'}</code> in the text field.</div>
+                <div>&bull; <strong>AI_TEXT_PROCESSOR</strong>: Type <code>{'{{variables.varName}}'}</code> anywhere in your instruction.</div>
+                <div>&bull; <strong>CONDITION</strong>: Use in Left or Right operands (e.g. <code>{'{{variables.threshold}}'}</code>).</div>
+                <div>&bull; <strong>Safe Fallback</strong>: Unrecognized variables are left intact.</div>
+              </div>
+            </div>
+          ) : selectedNode ? (
             <div className="d-flex flex-column gap-3 overflow-auto pe-1">
               {/* Node ID & Type Pill */}
               <div className="d-flex align-items-center justify-content-between">
@@ -2017,6 +2669,60 @@ function WorkflowCanvasInner() {
                   <small className="text-muted" style={{ fontSize: '0.7rem' }}>
                     This text will be forwarded to connected downstream nodes.
                   </small>
+
+                  {/* Workflow Variables Quick Insert */}
+                  <div className="bg-light p-2 rounded-2 border mt-2">
+                    <div className="d-flex align-items-center justify-content-between mb-1">
+                      <span className="small fw-bold text-secondary" style={{ fontSize: '0.7rem' }}>
+                        <i className="bi bi-braces-asterisk text-primary me-1"></i>
+                        Workflow Variables
+                      </span>
+                      <button
+                        type="button"
+                        className="btn btn-link btn-sm p-0 text-primary small text-decoration-none"
+                        style={{ fontSize: '0.68rem' }}
+                        onClick={() => setActiveSideTab('variables')}
+                      >
+                        Manage &rarr;
+                      </button>
+                    </div>
+                    {variables.length > 0 ? (
+                      <div className="d-flex flex-wrap gap-1">
+                        {variables
+                          .filter((v) => v.key && v.key.trim())
+                          .map((v) => (
+                            <button
+                              key={v.id}
+                              type="button"
+                              className="badge bg-white text-primary border text-decoration-none btn btn-sm py-1 px-2"
+                              style={{ fontSize: '0.68rem', cursor: 'pointer' }}
+                              title={`Insert {{variables.${v.key.trim()}}} into input text`}
+                              onClick={() => {
+                                const tag = `{{variables.${v.key.trim()}}}`;
+                                const cur = selectedNode.data.config?.text || '';
+                                updateSelectedNodeData({
+                                  config: { text: cur ? `${cur} ${tag}` : tag },
+                                });
+                              }}
+                            >
+                              + {`{{variables.${v.key.trim()}}}`}
+                            </button>
+                          ))}
+                      </div>
+                    ) : (
+                      <div className="text-muted" style={{ fontSize: '0.68rem' }}>
+                        No variables defined yet. Use <code>{'{{variables.name}}'}</code> or{' '}
+                        <button
+                          type="button"
+                          className="btn btn-link btn-sm p-0 text-primary text-decoration-none"
+                          style={{ fontSize: '0.68rem' }}
+                          onClick={() => setActiveSideTab('variables')}
+                        >
+                          add one now
+                        </button>.
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
 
@@ -2084,6 +2790,298 @@ function WorkflowCanvasInner() {
                 </div>
               )}
 
+              {selectedNode.data.type === 'CONDITION' && (
+                <div className="d-flex flex-column gap-3">
+                  {/* Condition Overview Banner */}
+                  <div className="alert alert-warning border border-warning-subtle small py-2 px-3 mb-0">
+                    <div className="d-flex align-items-center gap-1 fw-bold text-warning-emphasis mb-1">
+                      <i className="bi bi-signpost-split-fill"></i>
+                      <span>Condition Branching Node</span>
+                    </div>
+                    <p className="mb-0 text-secondary" style={{ fontSize: '0.72rem' }}>
+                      Evaluates the left operand against the right operand using the selected operator. Routes execution downstream to the <strong>TRUE</strong> or <strong>FALSE</strong> handle.
+                    </p>
+                  </div>
+
+                  {/* 1. Left Operand */}
+                  <div>
+                    <div className="d-flex align-items-center justify-content-between mb-1">
+                      <label htmlFor="condition-left-operand" className="form-label small fw-bold text-secondary mb-0">
+                        Left Operand
+                      </label>
+                      <span className="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle" style={{ fontSize: '0.65rem' }}>
+                        Required
+                      </span>
+                    </div>
+                    <input
+                      id="condition-left-operand"
+                      type="text"
+                      className="form-control form-control-sm font-monospace"
+                      value={selectedNode.data.config?.leftOperand ?? ''}
+                      onChange={(e) =>
+                        updateSelectedNodeData({
+                          config: { leftOperand: e.target.value },
+                        })
+                      }
+                      placeholder="e.g. {{input.score}} or {{variables.minScore}}"
+                    />
+                    <small className="text-muted d-block mt-1" style={{ fontSize: '0.7rem' }}>
+                      Value, number, string, or variable reference (<code>{'{{input.field}}'}</code>, <code>{'{{variables.name}}'}</code>, <code>{'{{nodes.id.field}}'}</code>).
+                    </small>
+
+                    {/* Quick Insert Helpers for Left Operand */}
+                    <div className="bg-light p-2 rounded-2 border mt-2">
+                      <div className="d-flex align-items-center justify-content-between mb-1">
+                        <span className="small fw-bold text-secondary" style={{ fontSize: '0.7rem' }}>
+                          <i className="bi bi-braces-asterisk text-primary me-1"></i>
+                          Quick-Insert Variable Reference
+                        </span>
+                        <button
+                          type="button"
+                          className="btn btn-link btn-sm p-0 text-primary small text-decoration-none"
+                          style={{ fontSize: '0.68rem' }}
+                          onClick={() => setActiveSideTab('variables')}
+                        >
+                          Variables &rarr;
+                        </button>
+                      </div>
+
+                      {/* Common Input Templates */}
+                      <div className="d-flex flex-wrap gap-1 mb-1">
+                        {['{{input.score}}', '{{input.text}}', '{{input.status}}'].map((item) => (
+                          <button
+                            key={item}
+                            type="button"
+                            className="badge bg-white text-dark border text-decoration-none btn btn-sm py-1 px-2"
+                            style={{ fontSize: '0.68rem', cursor: 'pointer' }}
+                            title={`Insert ${item} into left operand`}
+                            onClick={() =>
+                              updateSelectedNodeData({
+                                config: { leftOperand: item },
+                              })
+                            }
+                          >
+                            + {item}
+                          </button>
+                        ))}
+                      </div>
+
+                      {/* Upstream Node Output References if connected */}
+                      {selectedNodeIncomingNodes.length > 0 && (
+                        <div className="d-flex flex-wrap gap-1 mb-1">
+                          {selectedNodeIncomingNodes.map((srcNode) => (
+                            <button
+                              key={srcNode.id}
+                              type="button"
+                              className="badge bg-white text-info-emphasis border border-info-subtle text-decoration-none btn btn-sm py-1 px-2"
+                              style={{ fontSize: '0.68rem', cursor: 'pointer' }}
+                              title={`Insert output from ${srcNode.data?.name || srcNode.id}`}
+                              onClick={() => {
+                                const ref = `{{nodes.${srcNode.id}.result}}`;
+                                updateSelectedNodeData({
+                                  config: { leftOperand: ref },
+                                });
+                              }}
+                            >
+                              + {`{{nodes.${srcNode.id}.result}}`}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Defined Workflow Variables */}
+                      {variables.length > 0 ? (
+                        <div className="d-flex flex-wrap gap-1">
+                          {variables
+                            .filter((v) => v.key && v.key.trim())
+                            .map((v) => (
+                              <button
+                                key={v.id}
+                                type="button"
+                                className="badge bg-white text-primary border text-decoration-none btn btn-sm py-1 px-2"
+                                style={{ fontSize: '0.68rem', cursor: 'pointer' }}
+                                title={`Insert {{variables.${v.key.trim()}}} into left operand`}
+                                onClick={() =>
+                                  updateSelectedNodeData({
+                                    config: { leftOperand: `{{variables.${v.key.trim()}}}` },
+                                  })
+                                }
+                              >
+                                + {`{{variables.${v.key.trim()}}}`}
+                              </button>
+                            ))}
+                        </div>
+                      ) : (
+                        <div className="text-muted" style={{ fontSize: '0.68rem' }}>
+                          No workflow variables defined.{' '}
+                          <button
+                            type="button"
+                            className="btn btn-link btn-sm p-0 text-primary text-decoration-none"
+                            style={{ fontSize: '0.68rem' }}
+                            onClick={() => setActiveSideTab('variables')}
+                          >
+                            Add one
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* 2. Operator Dropdown */}
+                  <div>
+                    <label htmlFor="condition-operator-select" className="form-label small fw-bold text-secondary mb-1">
+                      Operator
+                    </label>
+                    <select
+                      id="condition-operator-select"
+                      className="form-select form-select-sm"
+                      value={selectedNode.data.config?.operator || 'GREATER_THAN'}
+                      onChange={(e) =>
+                        updateSelectedNodeData({
+                          config: { operator: e.target.value },
+                        })
+                      }
+                    >
+                      <optgroup label="Comparison">
+                        <option value="EQUALS">EQUALS (==)</option>
+                        <option value="NOT_EQUALS">NOT EQUALS (!=)</option>
+                      </optgroup>
+                      <optgroup label="Numeric Comparison">
+                        <option value="GREATER_THAN">GREATER THAN (&gt;)</option>
+                        <option value="GREATER_THAN_OR_EQUAL">GREATER THAN OR EQUAL (&gt;=)</option>
+                        <option value="LESS_THAN">LESS THAN (&lt;)</option>
+                        <option value="LESS_THAN_OR_EQUAL">LESS THAN OR EQUAL (&lt;=)</option>
+                      </optgroup>
+                      <optgroup label="Text &amp; Array">
+                        <option value="CONTAINS">CONTAINS</option>
+                        <option value="NOT_CONTAINS">NOT CONTAINS</option>
+                      </optgroup>
+                      <optgroup label="Emptiness (Unary)">
+                        <option value="IS_EMPTY">IS EMPTY (Unary)</option>
+                        <option value="IS_NOT_EMPTY">IS NOT EMPTY (Unary)</option>
+                      </optgroup>
+                    </select>
+
+                    {/* Operator Explanation Card */}
+                    {(() => {
+                      const curOp = selectedNode.data.config?.operator || 'GREATER_THAN';
+                      const opInfo = CONDITION_OPERATORS.find((o) => o.value === curOp);
+                      return opInfo ? (
+                        <div className="bg-light p-2 rounded-2 border mt-2" style={{ fontSize: '0.72rem' }}>
+                          <div className="fw-semibold text-dark mb-1">
+                            <i className="bi bi-info-circle text-primary me-1"></i>
+                            Operator: <code>{opInfo.value}</code>
+                          </div>
+                          <div className="text-secondary">{opInfo.description}</div>
+                        </div>
+                      ) : null;
+                    })()}
+                  </div>
+
+                  {/* 3. Right Operand (Hidden/Disabled for Unary Operators) */}
+                  {(() => {
+                    const curOp = selectedNode.data.config?.operator || 'GREATER_THAN';
+                    const isUnary = curOp === 'IS_EMPTY' || curOp === 'IS_NOT_EMPTY';
+
+                    if (isUnary) {
+                      return (
+                        <div className="card bg-light border p-2 rounded-2 text-muted" style={{ fontSize: '0.72rem' }}>
+                          <div className="fw-semibold text-secondary mb-1">
+                            <i className="bi bi-check2-circle text-success me-1"></i>
+                            Unary Operator Active
+                          </div>
+                          <div>
+                            <code>{curOp}</code> inspects only the <strong>Left Operand</strong>. No Right Operand is required or evaluated.
+                          </div>
+                        </div>
+                      );
+                    }
+
+                    return (
+                      <div>
+                        <div className="d-flex align-items-center justify-content-between mb-1">
+                          <label htmlFor="condition-right-operand" className="form-label small fw-bold text-secondary mb-0">
+                            Right Operand
+                          </label>
+                          <span className="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle" style={{ fontSize: '0.65rem' }}>
+                            Required for binary
+                          </span>
+                        </div>
+                        <input
+                          id="condition-right-operand"
+                          type="text"
+                          className="form-control form-control-sm font-monospace"
+                          value={selectedNode.data.config?.rightOperand ?? ''}
+                          onChange={(e) =>
+                            updateSelectedNodeData({
+                              config: { rightOperand: e.target.value },
+                            })
+                          }
+                          placeholder="e.g. 75, true, or {{variables.threshold}}"
+                        />
+                        <small className="text-muted d-block mt-1" style={{ fontSize: '0.7rem' }}>
+                          Target value or variable to compare against Left Operand.
+                        </small>
+
+                        {/* Quick Insert Helpers for Right Operand */}
+                        {variables.length > 0 && (
+                          <div className="bg-light p-2 rounded-2 border mt-2">
+                            <div className="d-flex align-items-center justify-content-between mb-1">
+                              <span className="small fw-bold text-secondary" style={{ fontSize: '0.7rem' }}>
+                                <i className="bi bi-braces-asterisk text-primary me-1"></i>
+                                Insert Variable into Right Operand
+                              </span>
+                            </div>
+                            <div className="d-flex flex-wrap gap-1">
+                              {variables
+                                .filter((v) => v.key && v.key.trim())
+                                .map((v) => (
+                                  <button
+                                    key={v.id}
+                                    type="button"
+                                    className="badge bg-white text-primary border text-decoration-none btn btn-sm py-1 px-2"
+                                    style={{ fontSize: '0.68rem', cursor: 'pointer' }}
+                                    title={`Insert {{variables.${v.key.trim()}}} into right operand`}
+                                    onClick={() =>
+                                      updateSelectedNodeData({
+                                        config: { rightOperand: `{{variables.${v.key.trim()}}}` },
+                                      })
+                                    }
+                                  >
+                                    + {`{{variables.${v.key.trim()}}}`}
+                                  </button>
+                                ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+
+                  {/* 4. Branch Routing Guide */}
+                  <div className="card bg-light border p-2 rounded-2">
+                    <div className="fw-bold small text-dark mb-1 d-flex align-items-center gap-1">
+                      <i className="bi bi-signpost-split text-warning"></i>
+                      <span>Branch Output Routing:</span>
+                    </div>
+                    <div className="d-flex flex-column gap-1 small" style={{ fontSize: '0.72rem' }}>
+                      <div className="d-flex align-items-center gap-2">
+                        <span className="badge bg-success text-white px-2 py-0">TRUE</span>
+                        <span className="text-secondary">Upper green handle: executes downstream steps when condition is met.</span>
+                      </div>
+                      <div className="d-flex align-items-center gap-2">
+                        <span className="badge bg-danger text-white px-2 py-0">FALSE</span>
+                        <span className="text-secondary">Lower red handle: executes downstream steps when condition is not met.</span>
+                      </div>
+                    </div>
+                    <div className="text-muted mt-2" style={{ fontSize: '0.68rem' }}>
+                      <i className="bi bi-slash-circle me-1 text-secondary"></i>
+                      Nodes on the branch not taken will be skipped with <code>SKIPPED</code> status.
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {selectedNode.data.type === 'AI_TEXT_PROCESSOR' && (
                 <div className="d-flex flex-column gap-3">
                   {/* 1. AI Instruction / Prompt */}
@@ -2111,6 +3109,60 @@ function WorkflowCanvasInner() {
                     <small className="text-muted d-block mt-1" style={{ fontSize: '0.7rem' }}>
                       Instructions for the AI agent. Combines automatically with connected upstream inputs.
                     </small>
+
+                    {/* Workflow Variables Quick Insert */}
+                    <div className="bg-light p-2 rounded-2 border mt-2">
+                      <div className="d-flex align-items-center justify-content-between mb-1">
+                        <span className="small fw-bold text-secondary" style={{ fontSize: '0.7rem' }}>
+                          <i className="bi bi-braces-asterisk text-primary me-1"></i>
+                          Workflow Variables
+                        </span>
+                        <button
+                          type="button"
+                          className="btn btn-link btn-sm p-0 text-primary small text-decoration-none"
+                          style={{ fontSize: '0.68rem' }}
+                          onClick={() => setActiveSideTab('variables')}
+                        >
+                          Manage &rarr;
+                        </button>
+                      </div>
+                      {variables.length > 0 ? (
+                        <div className="d-flex flex-wrap gap-1">
+                          {variables
+                            .filter((v) => v.key && v.key.trim())
+                            .map((v) => (
+                              <button
+                                key={v.id}
+                                type="button"
+                                className="badge bg-white text-primary border text-decoration-none btn btn-sm py-1 px-2"
+                                style={{ fontSize: '0.68rem', cursor: 'pointer' }}
+                                title={`Insert {{variables.${v.key.trim()}}} into prompt`}
+                                onClick={() => {
+                                  const tag = `{{variables.${v.key.trim()}}}`;
+                                  const cur = selectedNode.data.config?.prompt || '';
+                                  updateSelectedNodeData({
+                                    config: { prompt: cur ? `${cur} ${tag}` : tag },
+                                  });
+                                }}
+                              >
+                                + {`{{variables.${v.key.trim()}}}`}
+                              </button>
+                            ))}
+                        </div>
+                      ) : (
+                        <div className="text-muted" style={{ fontSize: '0.68rem' }}>
+                          No variables defined yet. Use <code>{'{{variables.name}}'}</code> or{' '}
+                          <button
+                            type="button"
+                            className="btn btn-link btn-sm p-0 text-primary text-decoration-none"
+                            style={{ fontSize: '0.68rem' }}
+                            onClick={() => setActiveSideTab('variables')}
+                          >
+                            add one now
+                          </button>.
+                        </div>
+                      )}
+                    </div>
                   </div>
 
                   {/* 2. Upstream Input Description */}
@@ -2255,9 +3307,18 @@ function WorkflowCanvasInner() {
             <div className="text-center text-muted my-auto py-5">
               <i className="bi bi-mouse2 fs-2 d-block mb-2 text-secondary opacity-50"></i>
               <h6 className="fw-semibold small text-dark mb-1">No Node Selected</h6>
-              <p className="small mb-0" style={{ fontSize: '0.75rem' }}>
+              <p className="small mb-3" style={{ fontSize: '0.75rem' }}>
                 Click on any node on the canvas to configure its parameters and options.
               </p>
+              <button
+                type="button"
+                className="btn btn-outline-primary btn-sm px-3"
+                style={{ fontSize: '0.75rem' }}
+                onClick={() => setActiveSideTab('variables')}
+              >
+                <i className="bi bi-braces-asterisk me-1"></i>
+                Manage Workflow Variables ({variables.length})
+              </button>
             </div>
           )}
         </aside>

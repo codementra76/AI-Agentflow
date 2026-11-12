@@ -1,7 +1,7 @@
 import React, { memo } from 'react';
 import { Handle, Position } from '@xyflow/react';
 
-// Meta definitions for the 5 backend node types
+// Meta definitions for backend node types
 const NODE_META = {
   MANUAL_TRIGGER: {
     label: 'Manual Trigger',
@@ -24,6 +24,14 @@ const NODE_META = {
     icon: 'bi-arrow-repeat',
     color: '#8b5cf6',
     badgeClass: 'bg-purple-subtle text-purple border-purple-subtle',
+    hasTarget: true,
+    hasSource: true,
+  },
+  CONDITION: {
+    label: 'Condition',
+    icon: 'bi-signpost-split-fill',
+    color: '#d97706',
+    badgeClass: 'bg-warning-subtle text-warning border-warning-subtle',
     hasTarget: true,
     hasSource: true,
   },
@@ -57,6 +65,13 @@ const CustomWorkflowNode = memo(({ data, selected }) => {
         return config.text ? `"${config.text.slice(0, 24)}${config.text.length > 24 ? '...' : ''}"` : 'No text entered';
       case 'TEXT_TRANSFORM':
         return config.operation ? `Op: ${config.operation}` : 'Op: UPPERCASE';
+      case 'CONDITION': {
+        const left = config.leftOperand || '{{left}}';
+        const op = config.operator || 'EQUALS';
+        const isUnary = op === 'IS_EMPTY' || op === 'IS_NOT_EMPTY';
+        const right = isUnary ? '' : (config.rightOperand || '{{right}}');
+        return isUnary ? `${left} ${op}` : `${left} ${op} ${right}`;
+      }
       case 'AI_TEXT_PROCESSOR': {
         const modelSuffix = config.model && config.model !== 'qwen2.5:3b' ? ` [${config.model}]` : '';
         if (config.prompt) {
@@ -83,6 +98,8 @@ const CustomWorkflowNode = memo(({ data, selected }) => {
           ? 'border-danger'
           : data.executionStatus === 'COMPLETED'
           ? 'border-success'
+          : data.executionStatus === 'SKIPPED'
+          ? 'border-secondary-subtle opacity-75'
           : isRunning
           ? 'border-info'
           : selected
@@ -90,14 +107,17 @@ const CustomWorkflowNode = memo(({ data, selected }) => {
           : 'border-secondary-subtle'
       }`}
       style={{
-        minWidth: '220px',
-        maxWidth: '280px',
-        backgroundColor: '#ffffff',
+        position: 'relative',
+        minWidth: nodeType === 'CONDITION' ? '250px' : '220px',
+        maxWidth: '290px',
+        backgroundColor: data.executionStatus === 'SKIPPED' ? '#f8f9fa' : '#ffffff',
         transition: 'all 0.15s ease-in-out',
         boxShadow: data.executionStatus === 'FAILED'
           ? '0 0 0 3px rgba(239, 68, 68, 0.25)'
           : data.executionStatus === 'COMPLETED'
           ? '0 0 0 3px rgba(16, 185, 129, 0.25)'
+          : data.executionStatus === 'SKIPPED'
+          ? '0 0 0 2px rgba(108, 117, 125, 0.2)'
           : isRunning
           ? '0 0 0 3px rgba(6, 182, 212, 0.4)'
           : selected
@@ -148,6 +168,8 @@ const CustomWorkflowNode = memo(({ data, selected }) => {
                   ? 'bg-success text-white'
                   : data.executionStatus === 'FAILED'
                   ? 'bg-danger text-white'
+                  : data.executionStatus === 'SKIPPED'
+                  ? 'bg-secondary text-white'
                   : 'bg-info text-dark fw-semibold'
               }`}
               style={{ fontSize: '0.65rem' }}
@@ -157,6 +179,8 @@ const CustomWorkflowNode = memo(({ data, selected }) => {
                 '✓ OK'
               ) : data.executionStatus === 'FAILED' ? (
                 '✗ Fail'
+              ) : data.executionStatus === 'SKIPPED' ? (
+                '⊘ Skipped'
               ) : (
                 <>
                   <span className="spinner-border spinner-border-sm" style={{ width: '8px', height: '8px', borderWidth: '1px' }}></span>
@@ -172,17 +196,26 @@ const CustomWorkflowNode = memo(({ data, selected }) => {
       </div>
 
       {/* Node Body */}
-      <div className="card-body p-2 px-3">
-        <div className="fw-bold text-dark text-truncate" style={{ fontSize: '0.9rem' }}>
+      <div
+        className="card-body p-2 px-3"
+        style={{ paddingRight: nodeType === 'CONDITION' ? '65px' : undefined }}
+      >
+        <div
+          className="fw-bold text-dark text-truncate"
+          style={{ fontSize: '0.9rem', maxWidth: nodeType === 'CONDITION' ? '160px' : undefined }}
+        >
           {data.name || meta.label}
         </div>
-        <div className="text-muted small text-truncate mt-1" style={{ fontSize: '0.75rem' }}>
+        <div
+          className="text-muted small text-truncate mt-1 font-monospace"
+          style={{ fontSize: '0.75rem', maxWidth: nodeType === 'CONDITION' ? '160px' : undefined }}
+        >
           {renderConfigPreview()}
         </div>
       </div>
 
-      {/* Source Handle (Right) - for outgoing data */}
-      {meta.hasSource && (
+      {/* Standard Source Handle (Right) for non-condition nodes */}
+      {meta.hasSource && nodeType !== 'CONDITION' && (
         <Handle
           type="source"
           position={Position.Right}
@@ -198,6 +231,83 @@ const CustomWorkflowNode = memo(({ data, selected }) => {
             zIndex: 10,
           }}
         />
+      )}
+
+      {/* Dedicated TRUE and FALSE Source Handles (Right) for CONDITION nodes */}
+      {nodeType === 'CONDITION' && (
+        <>
+          {/* Upper-Right: TRUE Handle (Green) */}
+          <div
+            className="position-absolute d-flex align-items-center"
+            style={{
+              right: '16px',
+              top: '32%',
+              transform: 'translateY(-50%)',
+              pointerEvents: 'none',
+              zIndex: 5,
+            }}
+          >
+            <span
+              className="badge bg-success-subtle text-success border border-success-subtle fw-bold"
+              style={{ fontSize: '0.62rem', padding: '1px 4px', letterSpacing: '0.5px' }}
+            >
+              TRUE
+            </span>
+          </div>
+          <Handle
+            type="source"
+            position={Position.Right}
+            id="true"
+            title="Connect TRUE branch (Condition met)"
+            style={{
+              top: '32%',
+              transform: 'translateY(-50%)',
+              width: '14px',
+              height: '14px',
+              background: '#198754',
+              border: '2px solid #ffffff',
+              boxShadow: '0 0 0 2px rgba(25, 135, 84, 0.4)',
+              cursor: 'crosshair',
+              zIndex: 10,
+            }}
+          />
+
+          {/* Lower-Right: FALSE Handle (Red) */}
+          <div
+            className="position-absolute d-flex align-items-center"
+            style={{
+              right: '16px',
+              top: '68%',
+              transform: 'translateY(-50%)',
+              pointerEvents: 'none',
+              zIndex: 5,
+            }}
+          >
+            <span
+              className="badge bg-danger-subtle text-danger border border-danger-subtle fw-bold"
+              style={{ fontSize: '0.62rem', padding: '1px 4px', letterSpacing: '0.5px' }}
+            >
+              FALSE
+            </span>
+          </div>
+          <Handle
+            type="source"
+            position={Position.Right}
+            id="false"
+            title="Connect FALSE branch (Condition not met)"
+            style={{
+              top: '68%',
+              transform: 'translateY(-50%)',
+              width: '14px',
+              height: '14px',
+              background: '#dc3545',
+              border: '2px solid #ffffff',
+              boxShadow: '0 0 0 2px rgba(220, 53, 69, 0.4)',
+              cursor: 'crosshair',
+              zIndex: 10,
+            }}
+          />
+        </>
       )}
     </div>
   );

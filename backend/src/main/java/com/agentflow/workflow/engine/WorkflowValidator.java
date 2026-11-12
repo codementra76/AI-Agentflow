@@ -113,7 +113,22 @@ public class WorkflowValidator {
                     edgeId = "edge-" + source + "->" + target;
                 }
 
-                edges.add(new WorkflowEdge(edgeId, source, target));
+                String sourceHandle = extractHandle(edgeJson, "sourceHandle");
+                String label = extractText(edgeJson, "label");
+
+                WorkflowNode sourceNode = nodeMap.get(source);
+                if (sourceNode != null && sourceNode.type() == NodeType.CONDITION) {
+                    if (sourceHandle == null || sourceHandle.trim().isEmpty()) {
+                        throw new WorkflowValidationException("Edge '" + edgeId + "' from CONDITION node '" + source + "' must specify a 'sourceHandle' ('true' or 'false')");
+                    }
+                    String normalized = sourceHandle.trim().toLowerCase();
+                    if (!normalized.equals("true") && !normalized.equals("false")) {
+                        throw new WorkflowValidationException("Edge '" + edgeId + "' from CONDITION node '" + source + "' has invalid sourceHandle '" + sourceHandle + "'. Must be 'true' or 'false'");
+                    }
+                    sourceHandle = normalized;
+                }
+
+                edges.add(new WorkflowEdge(edgeId, source, target, sourceHandle, label));
                 outgoingEdges.get(source).add(target);
                 incomingEdges.get(target).add(source);
             }
@@ -208,5 +223,16 @@ public class WorkflowValidator {
             return node.get(fieldName).asText();
         }
         return null;
+    }
+
+    private String extractHandle(JsonNode edgeJson, String fieldName) {
+        if (edgeJson == null || !edgeJson.has(fieldName) || edgeJson.get(fieldName).isNull()) {
+            return null;
+        }
+        JsonNode val = edgeJson.get(fieldName);
+        if (val.isBoolean()) {
+            return String.valueOf(val.asBoolean());
+        }
+        return val.asText().trim();
     }
 }

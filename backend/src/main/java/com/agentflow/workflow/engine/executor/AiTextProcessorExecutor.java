@@ -15,11 +15,14 @@ import org.springframework.stereotype.Component;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 @Component
 public class AiTextProcessorExecutor implements NodeExecutor {
 
     private static final Logger log = LoggerFactory.getLogger(AiTextProcessorExecutor.class);
+    private static final Pattern EXPLICIT_SOURCE_VAR_PATTERN =
+            Pattern.compile("\\{\\{\\s*(nodes\\.|input(\\b|\\.))");
 
     private final OllamaService ollamaService;
 
@@ -54,8 +57,8 @@ public class AiTextProcessorExecutor implements NodeExecutor {
         JsonNode incoming = context.getIncomingData(node.id(), sourceNodeIds);
         String upstreamText = extractIncomingText(incoming);
 
-        // 3. Combine prompt and upstream input in a clear, predictable format
-        String finalPrompt = buildFinalPrompt(configuredPrompt, upstreamText, node.id());
+        // 3. Combine prompt and upstream input in a clear, predictable format with variable interpolation
+        String finalPrompt = buildFinalPrompt(configuredPrompt, upstreamText, node.id(), context);
 
         // 4. Invoke OllamaService (logging prompt length only to protect user privacy)
         log.info("Executing AI_TEXT_PROCESSOR node [{}] (prompt length: {} chars, model override: {})",
@@ -85,14 +88,27 @@ public class AiTextProcessorExecutor implements NodeExecutor {
         return result;
     }
 
-    private String buildFinalPrompt(String configuredPrompt, String upstreamText, String nodeId) {
-        boolean hasPrompt = configuredPrompt != null && !configuredPrompt.trim().isEmpty();
+    private String buildFinalPrompt(String configuredPrompt, String upstreamText, String nodeId, ExecutionContext context) {
+        String resolvedPrompt = configuredPrompt;
+        boolean hadVariables = false;
+
+        if (configuredPrompt != null && configuredPrompt.contains("{{") && context != null) {
+            hadVariables = true;
+            resolvedPrompt = context.resolve(configuredPrompt);
+        }
+
+        boolean hasPrompt = resolvedPrompt != null && !resolvedPrompt.trim().isEmpty();
         boolean hasInput = upstreamText != null && !upstreamText.trim().isEmpty();
 
         if (hasPrompt && hasInput) {
-            return configuredPrompt.trim() + "\n\nInput:\n" + upstreamText.trim();
+            // When the prompt explicitly references node outputs or input data via {{nodes...}} or {{input...}},
+            // avoid duplicating the upstream text by appending it.
+            if (hadVariables && EXPLICIT_SOURCE_VAR_PATTERN.matcher(configuredPrompt).find()) {
+                return resolvedPrompt.trim();
+            }
+            return resolvedPrompt.trim() + "\n\nInput:\n" + upstreamText.trim();
         } else if (hasPrompt) {
-            return configuredPrompt.trim();
+            return resolvedPrompt.trim();
         } else if (hasInput) {
             return upstreamText.trim();
         } else {

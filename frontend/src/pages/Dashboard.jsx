@@ -8,8 +8,11 @@ import {
   getAllExecutions,
   retryExecution,
   getHealth,
-  getErrorMessage
+  getErrorMessage,
+  getWorkflowSchedule,
+  updateScheduleStatus,
 } from '../services/api';
+import { formatTimestampInTz } from '../utils/scheduleUtils';
 
 function Dashboard() {
   const [activeTab, setActiveTab] = useState('workflows'); // 'workflows' | 'history'
@@ -29,6 +32,10 @@ function Dashboard() {
   // Toggle active state tracker (to show spinner per-row)
   const [togglingId, setTogglingId] = useState(null);
   const [deletingId, setDeletingId] = useState(null);
+
+  // Phase 8: Schedule summaries and quick status toggle
+  const [schedulesMap, setSchedulesMap] = useState({});
+  const [togglingScheduleId, setTogglingScheduleId] = useState(null);
 
   // Phase 5: Execution History State
   const [executions, setExecutions] = useState([]);
@@ -68,14 +75,31 @@ function Dashboard() {
 
       if (workflowRes && workflowRes.success && Array.isArray(workflowRes.data)) {
         setWorkflows(workflowRes.data);
+        // Concurrently fetch schedule status for each workflow
+        Promise.allSettled(
+          workflowRes.data.map((wf) => getWorkflowSchedule(wf.id))
+        ).then((results) => {
+          const map = {};
+          results.forEach((res, idx) => {
+            const wfId = workflowRes.data[idx]?.id;
+            if (wfId && res.status === 'fulfilled' && res.value?.success && res.value?.data) {
+              map[wfId] = res.value.data;
+            } else if (wfId) {
+              map[wfId] = null;
+            }
+          });
+          setSchedulesMap(map);
+        });
       } else {
         setWorkflows([]);
+        setSchedulesMap({});
         setError('Received unexpected data format from backend.');
       }
     } catch (err) {
       const msg = getErrorMessage(err);
       setError(msg);
       setWorkflows([]);
+      setSchedulesMap({});
     } finally {
       setLoading(false);
     }
@@ -230,6 +254,11 @@ function Dashboard() {
     try {
       await deleteWorkflow(workflow.id);
       setWorkflows((prev) => prev.filter((w) => w.id !== workflow.id));
+      setSchedulesMap((prev) => {
+        const next = { ...prev };
+        delete next[workflow.id];
+        return next;
+      });
       if (executionResult && executionResult.workflowId === workflow.id) {
         setExecutionResult(null);
       }
@@ -244,6 +273,36 @@ function Dashboard() {
       });
     } finally {
       setDeletingId(null);
+    }
+  };
+
+  /**
+   * Quick toggle schedule enabled/disabled status from dashboard table
+   */
+  const handleToggleScheduleStatus = async (workflowId) => {
+    const current = schedulesMap[workflowId];
+    if (!current) return;
+    setTogglingScheduleId(workflowId);
+    setActionMessage(null);
+    try {
+      const response = await updateScheduleStatus(workflowId, !current.enabled);
+      if (response && response.success && response.data) {
+        setSchedulesMap((prev) => ({
+          ...prev,
+          [workflowId]: response.data,
+        }));
+        setActionMessage({
+          type: 'success',
+          text: `Schedule for workflow #${workflowId} is now ${response.data.enabled ? 'ACTIVE' : 'PAUSED'}.`,
+        });
+      }
+    } catch (err) {
+      setActionMessage({
+        type: 'danger',
+        text: `Failed to update schedule status: ${getErrorMessage(err)}`,
+      });
+    } finally {
+      setTogglingScheduleId(null);
     }
   };
 
@@ -302,6 +361,17 @@ function Dashboard() {
           </div>
 
           <div className="d-flex align-items-center gap-3">
+            {/* Link to Job Search */}
+            <Link
+              to="/jobs"
+              className="btn btn-outline-light btn-sm d-flex align-items-center gap-2 px-3 fw-medium shadow-sm"
+              id="nav-job-search-btn"
+              title="Open Job Search Assistant"
+            >
+              <i className="bi bi-briefcase-fill text-warning"></i>
+              <span>Job Search</span>
+            </Link>
+
             {/* Link to AI Assistant */}
             <Link
               to="/chat"
@@ -620,10 +690,12 @@ function Dashboard() {
                                     className={`badge ${
                                       log.status === 'COMPLETED'
                                         ? 'bg-success-subtle text-success'
+                                        : log.status === 'SKIPPED'
+                                        ? 'bg-secondary-subtle text-secondary'
                                         : 'bg-danger-subtle text-danger'
                                     } border`}
                                   >
-                                    {log.status}
+                                    {log.status === 'SKIPPED' ? '⊘ SKIPPED' : log.status}
                                   </span>
                                 </td>
                                 <td>
@@ -726,11 +798,12 @@ function Dashboard() {
                   <table className="table table-hover align-middle mb-0">
                     <thead className="table-light small text-uppercase">
                       <tr>
-                        <th scope="col" style={{ width: '80px' }}>ID</th>
+                        <th scope="col" style={{ width: '70px' }}>ID</th>
                         <th scope="col">Workflow Name &amp; Description</th>
-                        <th scope="col" style={{ width: '130px' }}>Nodes</th>
-                        <th scope="col" style={{ width: '130px' }}>Status</th>
-                        <th scope="col" style={{ width: '180px' }}>Created</th>
+                        <th scope="col" style={{ width: '110px' }}>Nodes</th>
+                        <th scope="col" style={{ width: '110px' }}>Status</th>
+                        <th scope="col" style={{ width: '220px' }}>Schedule</th>
+                        <th scope="col" style={{ width: '150px' }}>Created</th>
                         <th scope="col" className="text-end" style={{ width: '280px' }}>Actions</th>
                       </tr>
                     </thead>
@@ -803,6 +876,70 @@ function Dashboard() {
                                   </>
                                 )}
                               </button>
+                            </td>
+
+                            {/* Schedule Summary & Quick Toggle */}
+                            <td>
+                              {schedulesMap[workflow.id] ? (
+                                <div className="d-flex flex-column gap-1">
+                                  <div className="d-flex align-items-center gap-1">
+                                    <span
+                                      className={`badge ${
+                                        schedulesMap[workflow.id].scheduleType === 'DAILY'
+                                          ? 'bg-info-subtle text-info border border-info-subtle'
+                                          : schedulesMap[workflow.id].scheduleType === 'WEEKLY'
+                                          ? 'bg-primary-subtle text-primary border border-primary-subtle'
+                                          : 'bg-warning-subtle text-warning border border-warning-subtle'
+                                      }`}
+                                      style={{ fontSize: '0.68rem' }}
+                                    >
+                                      <i className="bi bi-clock me-1"></i>
+                                      {schedulesMap[workflow.id].scheduleType === 'DAILY'
+                                        ? 'Daily'
+                                        : schedulesMap[workflow.id].scheduleType === 'WEEKLY'
+                                        ? 'Weekly'
+                                        : 'One-time'}
+                                    </span>
+                                    <button
+                                      type="button"
+                                      id={`btn-toggle-sched-${workflow.id}`}
+                                      className={`btn btn-sm py-0 px-1 border-0 ${
+                                        schedulesMap[workflow.id].enabled ? 'text-success' : 'text-muted'
+                                      }`}
+                                      style={{ fontSize: '0.72rem' }}
+                                      onClick={() => handleToggleScheduleStatus(workflow.id)}
+                                      disabled={togglingScheduleId === workflow.id}
+                                      title={
+                                        schedulesMap[workflow.id].enabled
+                                          ? 'Schedule is active. Click to pause.'
+                                          : 'Schedule is paused. Click to resume.'
+                                      }
+                                    >
+                                      {togglingScheduleId === workflow.id ? (
+                                        <span className="spinner-border spinner-border-sm" style={{ width: '0.65rem', height: '0.65rem' }}></span>
+                                      ) : (
+                                        <i className={`bi ${schedulesMap[workflow.id].enabled ? 'bi-toggle-on fs-6' : 'bi-toggle-off fs-6'}`}></i>
+                                      )}
+                                    </button>
+                                  </div>
+                                  <div className="text-muted" style={{ fontSize: '0.7rem' }}>
+                                    {schedulesMap[workflow.id].enabled && schedulesMap[workflow.id].nextRunAt ? (
+                                      <span title={`Next: ${formatTimestampInTz(schedulesMap[workflow.id].nextRunAt, schedulesMap[workflow.id].timeZone)}`}>
+                                        Next: {new Date(schedulesMap[workflow.id].nextRunAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}{' '}
+                                        {new Date(schedulesMap[workflow.id].nextRunAt).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
+                                      </span>
+                                    ) : (
+                                      <span className="fst-italic text-muted opacity-75">
+                                        {schedulesMap[workflow.id].enabled ? 'No upcoming run' : 'Paused'}
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                              ) : (
+                                <span className="text-muted small fst-italic" style={{ fontSize: '0.75rem' }}>
+                                  No schedule
+                                </span>
+                              )}
                             </td>
 
                             {/* Created Date */}
@@ -1415,10 +1552,18 @@ function Dashboard() {
                                           ? 'bg-success-subtle text-success border border-success-subtle'
                                           : log.status === 'FAILED'
                                           ? 'bg-danger-subtle text-danger border border-danger-subtle'
+                                          : log.status === 'SKIPPED'
+                                          ? 'bg-secondary-subtle text-secondary border border-secondary-subtle'
                                           : 'bg-primary-subtle text-primary border border-primary-subtle'
                                       }`}
                                     >
-                                      {log.status === 'COMPLETED' ? '✓ COMPLETED' : log.status === 'FAILED' ? '✗ FAILED' : log.status}
+                                      {log.status === 'COMPLETED'
+                                        ? '✓ COMPLETED'
+                                        : log.status === 'FAILED'
+                                        ? '✗ FAILED'
+                                        : log.status === 'SKIPPED'
+                                        ? '⊘ SKIPPED'
+                                        : log.status}
                                     </span>
                                   </td>
                                   <td className="font-monospace text-muted">{stepDuration}</td>
